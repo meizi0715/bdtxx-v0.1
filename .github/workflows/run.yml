@@ -1,0 +1,19 @@
+name: run
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python scripts/scan_daily.py
+        env:
+          CFG_A1: ${{ secrets.CFG_A1 }}
+          CFG_A2: ${{ secrets.CFG_A2 }}
+          CFG_A3: ${{ secrets.CFG_A3 }}
+          CFG_B1: ${{ secrets.CFG_B1 }}
+          CFG_B2: ${{ secrets.CFG_B2 }}
