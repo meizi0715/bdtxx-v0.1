@@ -1,0 +1,5 @@
+{
+  "subject": "Report ({mmdd})",
+  "header": "Hello,\n\nPlease find the report below.",
+  "footer": "----------footer----------\n・item A\n・item B\n-----------------------------"
+}

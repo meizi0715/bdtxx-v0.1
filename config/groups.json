@@ -1,6 +1,0 @@
-{
-  "groups": [
-    {"id": "g1", "name": "g1", "username": "u1", "password_env": "CFG_C1"},
-    {"id": "g2", "name": "g2", "username": "u2", "password_env": "CFG_C2"}
-  ]
-}

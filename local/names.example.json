@@ -1,14 +1,14 @@
 {
-  "v01": "",
-  "v02": "",
-  "v03": "",
-  "v04": "",
-  "v05": "",
-  "v06": "",
-  "v07": "",
-  "v08": "",
-  "v09": "",
-  "v10": "",
-  "v11": "",
-  "v12": ""
+  "v01": {"name": "", "letter": "A"},
+  "v02": {"name": "", "letter": "B"},
+  "v03": {"name": "", "letter": "C"},
+  "v04": {"name": "", "letter": "D"},
+  "v05": {"name": "", "letter": "E"},
+  "v06": {"name": "", "letter": "F"},
+  "v07": {"name": "", "letter": "G"},
+  "v08": {"name": "", "letter": "H"},
+  "v09": {"name": "", "letter": "I"},
+  "v10": {"name": "", "letter": "J"},
+  "v11": {"name": "", "letter": "K"},
+  "v12": {"name": "", "letter": "L"}
 }

@@ -6,9 +6,11 @@ import calendar
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import jpholiday
@@ -19,14 +21,203 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 PATH_T1 = DATA_DIR / "t1.json"
 PATH_T2 = DATA_DIR / "t2.json"
+PATH_SUP = DATA_DIR / "suppressed.json"
+PATH_FAIL = DATA_DIR / "fail_count.json"
+PATH_DAILY_SENT = DATA_DIR / "daily_sent.json"
+PATH_LOG = DATA_DIR / "scan.log"
+PATH_BOOKING_LOG = DATA_DIR / "booking.log"
+PATH_CHANGES_LOG = DATA_DIR / "changes.log"
 PATH_CFG = ROOT / "config" / "cfg_items.json"
 
+TZ_TOKYO = ZoneInfo("Asia/Tokyo")
 DELTA_T = timedelta(hours=4)
-CUT_H = 17
+CUT_H = 15
 BOUND_T = "19:00"
 _ST_OK = "available"
 _MAX_TRY = 3
 _WAIT_S = 2.0
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+_LOG_READY = False
+_BOOKING_LOG_READY = False
+_CHANGES_LOG_READY = False
+_LOG_KEEP_DAYS = 3
+_CHANGES_LOG_KEEP_DAYS = 90
+_LOG_LINE_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+_LOG_FMT = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+changes_logger = logging.getLogger("core.scanner.changes")
+
+
+def prune_log(
+    path: Path | None = None,
+    *,
+    keep_days: int = _LOG_KEEP_DAYS,
+    now: datetime | None = None,
+) -> None:
+    """Keep only lines dated within the last keep_days calendar days (Tokyo)."""
+    p = path or PATH_LOG
+    if not p.exists() or keep_days < 1:
+        return
+    cur = now if now is not None else now_tokyo()
+    if cur.tzinfo is not None:
+        cur = cur.astimezone(TZ_TOKYO).replace(tzinfo=None)
+    cutoff = cur.date() - timedelta(days=keep_days - 1)
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if not text:
+        return
+    kept: list[str] = []
+    keeping = False
+    for line in text.splitlines(keepends=True):
+        m = _LOG_LINE_DATE.match(line)
+        if m:
+            try:
+                d = date.fromisoformat(m.group(1))
+            except ValueError:
+                if keeping:
+                    kept.append(line)
+                continue
+            keeping = d >= cutoff
+            if keeping:
+                kept.append(line)
+            continue
+        if keeping:
+            kept.append(line)
+    new_text = "".join(kept)
+    if new_text == text:
+        return
+    try:
+        p.write_text(new_text, encoding="utf-8")
+    except OSError:
+        logger.warning("log prune write failed: %s", p)
+
+
+def _ensure_console_logging(level: int = logging.INFO) -> None:
+    """Shared StreamHandler on the root logger (idempotent)."""
+    root = logging.getLogger()
+    root.setLevel(level)
+    has_stream = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    )
+    if not has_stream:
+        sh = logging.StreamHandler()
+        sh.setFormatter(_LOG_FMT)
+        sh.setLevel(level)
+        root.addHandler(sh)
+
+
+def _detach_root_file_handler(path: Path) -> None:
+    """Remove legacy root FileHandlers that wrote into path (migration)."""
+    root = logging.getLogger()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return
+    for h in list(root.handlers):
+        if not isinstance(h, logging.FileHandler):
+            continue
+        try:
+            if Path(getattr(h, "baseFilename", "")).resolve() == resolved:
+                root.removeHandler(h)
+                h.close()
+        except OSError:
+            continue
+
+
+class _BookingStepFileFilter(logging.Filter):
+    """Pass DEBUG always; INFO+ only when marked booking_step."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.INFO:
+            return True
+        return bool(getattr(record, "booking_step", False))
+
+
+def _attach_named_file_logger(
+    logger_name: str,
+    path: Path,
+    *,
+    level: int = logging.INFO,
+    booking_step_filter: bool = False,
+) -> None:
+    """Attach a FileHandler to a named logger if not already present."""
+    log = logging.getLogger(logger_name)
+    log.setLevel(level)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for h in log.handlers:
+        if isinstance(h, logging.FileHandler):
+            try:
+                if Path(getattr(h, "baseFilename", "")).resolve() == resolved:
+                    return
+            except OSError:
+                continue
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setFormatter(_LOG_FMT)
+    fh.setLevel(level)
+    if booking_step_filter:
+        fh.addFilter(_BookingStepFileFilter())
+    log.addHandler(fh)
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """Console + core.scanner → data/scan.log; changes → data/changes.log."""
+    global _LOG_READY, _CHANGES_LOG_READY
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_console_logging(level)
+    _detach_root_file_handler(PATH_LOG)
+    _detach_root_file_handler(PATH_CHANGES_LOG)
+    if not _LOG_READY:
+        prune_log(PATH_LOG)
+        _attach_named_file_logger("core.scanner", PATH_LOG, level=level)
+        # Quiet noisy HTTP client chatter at INFO
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("googleapiclient").setLevel(logging.WARNING)
+        logging.getLogger("google_auth_httplib2").setLevel(logging.WARNING)
+        _LOG_READY = True
+    if not _CHANGES_LOG_READY:
+        prune_log(PATH_CHANGES_LOG, keep_days=_CHANGES_LOG_KEEP_DAYS)
+        changes_logger.propagate = False
+        _attach_named_file_logger(
+            "core.scanner.changes", PATH_CHANGES_LOG, level=level
+        )
+        _CHANGES_LOG_READY = True
+
+
+def setup_booking_logging(level: int = logging.INFO) -> None:
+    """Console + core.booking → data/booking.log (idempotent)."""
+    global _BOOKING_LOG_READY
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_console_logging(level)
+    if _BOOKING_LOG_READY:
+        return
+    prune_log(PATH_BOOKING_LOG)
+    _attach_named_file_logger(
+        "core.booking",
+        PATH_BOOKING_LOG,
+        level=level,
+        booking_step_filter=True,
+    )
+    _BOOKING_LOG_READY = True
+
+
+def now_tokyo() -> datetime:
+    """Wall-clock now in Asia/Tokyo (naive, for stamp compatibility)."""
+    return datetime.now(TZ_TOKYO).replace(tzinfo=None)
+
+
+def today_tokyo() -> date:
+    return now_tokyo().date()
 
 
 def helper_1(today: date | datetime) -> date:
@@ -59,10 +250,13 @@ def helper_3(d: date | datetime) -> bool:
 
 def helper_4(today: date | datetime) -> date:
     if isinstance(today, datetime):
-        cur = today
-        day = today.date()
+        if today.tzinfo is not None:
+            cur = today.astimezone(TZ_TOKYO).replace(tzinfo=None)
+        else:
+            cur = today
+        day = cur.date()
     else:
-        cur = datetime.now()
+        cur = now_tokyo()
         day = today
     last = calendar.monthrange(day.year, day.month)[1]
     if day.day == last and cur.hour >= CUT_H:
@@ -75,6 +269,24 @@ def helper_5(d: date, time_string: str) -> bool:
     if helper_3(d):
         return True
     return start >= BOUND_T
+
+
+def helper_7(details: list[dict[str, Any]], area_blocks: dict[Any, list[Any]]) -> bool:
+    """True if any detail with blocks length == 1 has status == _ST_OK."""
+    for det in details:
+        if not isinstance(det, dict):
+            continue
+        aid = det.get("areaId")
+        blocks = None
+        if aid in area_blocks:
+            blocks = area_blocks[aid]
+        elif aid is not None and str(aid) in area_blocks:
+            blocks = area_blocks[str(aid)]
+        if not isinstance(blocks, list) or len(blocks) != 1:
+            continue
+        if det.get("status") == _ST_OK:
+            return True
+    return False
 
 
 def helper_6(start: date, end: date) -> list[date]:
@@ -92,15 +304,13 @@ def helper_6(start: date, end: date) -> list[date]:
 def _load_map(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
-    try:
-        with path.open(encoding="utf-8") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            return {}
-        return {str(k): str(v) for k, v in raw.items()}
-    except (json.JSONDecodeError, OSError):
-        logger.exception("load failed: %s", path)
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
         return {}
+    raw = json.loads(text)
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()}
 
 
 def _save_map(path: Path, data: dict[str, str]) -> None:
@@ -112,21 +322,52 @@ def _save_map(path: Path, data: dict[str, str]) -> None:
 def _load_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
-    try:
-        with path.open(encoding="utf-8") as f:
-            raw = json.load(f)
-        if isinstance(raw, list):
-            return [str(x) for x in raw]
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
         return []
-    except (json.JSONDecodeError, OSError):
-        logger.exception("load failed: %s", path)
-        return []
+    raw = json.loads(text)
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    return []
 
 
 def _save_lines(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(lines, f, ensure_ascii=False, indent=2)
+
+
+def load_daily_sent_date(path: Path | None = None) -> str | None:
+    """Return last_sent_date (YYYY-MM-DD) or None if missing/empty."""
+    p = path or PATH_DAILY_SENT
+    if not p.exists():
+        return None
+    text = p.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    raw = json.loads(text)
+    if not isinstance(raw, dict):
+        return None
+    val = str(raw.get("last_sent_date") or "").strip()
+    return val or None
+
+
+def save_daily_sent_date(day: date | str, path: Path | None = None) -> None:
+    """Persist last_sent_date for Tokyo calendar day."""
+    p = path or PATH_DAILY_SENT
+    if isinstance(day, date):
+        s = day.strftime("%Y-%m-%d")
+    else:
+        s = str(day).strip()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump({"last_sent_date": s}, f, ensure_ascii=False, indent=2)
+
+
+def is_daily_first_send(today: date, path: Path | None = None) -> bool:
+    """True when daily_sent.json is missing or last_sent_date != today."""
+    last = load_daily_sent_date(path)
+    return last != today.strftime("%Y-%m-%d")
 
 
 def load_cfg(path: Path | None = None) -> list[dict[str, Any]]:
@@ -137,56 +378,140 @@ def load_cfg(path: Path | None = None) -> list[dict[str, Any]]:
     return list(items)
 
 
+def _parse_slot_key(key: str) -> tuple[str, str] | None:
+    """Return (code, YYYY-MM-DD) from 'code|YYYY-MM-DD HH:MM-HH:MM'."""
+    if "|" not in key:
+        return None
+    code, rest = key.split("|", 1)
+    day_s = rest.strip().split(" ", 1)[0][:10]
+    try:
+        date.fromisoformat(day_s)
+    except ValueError:
+        return None
+    return code.strip(), day_s
+
+
+def _key_in_failed(key: str, failed_scope: set[tuple[str, str]]) -> bool:
+    parsed = _parse_slot_key(key)
+    if not parsed:
+        return False
+    code, day_s = parsed
+    if (code, day_s) in failed_scope:
+        return True
+    if (code, day_s[:7]) in failed_scope:
+        return True
+    return False
+
+
 def proc_b(
     current_keys: set[str],
     now: datetime,
     *,
     path_t1: Path | None = None,
+    path_sup: Path | None = None,
+    failed_scope: set[tuple[str, str]] | None = None,
 ) -> None:
+    """Update first_seen (t1). Skip keys already in suppressed."""
     p1 = path_t1 or PATH_T1
+    suppressed = _load_map(path_sup or PATH_SUP)
+    failed = failed_scope or set()
     t1 = _load_map(p1)
     for k in list(t1.keys()):
         if k not in current_keys:
+            if _key_in_failed(k, failed):
+                continue
             del t1[k]
     stamp = now.isoformat(timespec="seconds")
     for k in current_keys:
+        if k in suppressed:
+            continue
         if k not in t1:
             t1[k] = stamp
     _save_map(p1, t1)
 
 
-def proc_c(
+def proc_promote(
     current_keys: set[str],
     now: datetime,
     *,
     path_t1: Path | None = None,
+    path_sup: Path | None = None,
     delta: timedelta | None = None,
 ) -> set[str]:
+    """Move keys present >= delta from t1 into suppressed. Return newly promoted."""
     p1 = path_t1 or PATH_T1
+    ps = path_sup or PATH_SUP
     thr = delta if delta is not None else DELTA_T
     t1 = _load_map(p1)
-    ready: set[str] = set()
-    for k in current_keys:
-        raw = t1.get(k)
-        if not raw:
+    suppressed = _load_map(ps)
+    promoted: set[str] = set()
+    stamp = now.isoformat(timespec="seconds")
+    for k, raw in list(t1.items()):
+        if k not in current_keys:
             continue
         try:
             seen = datetime.fromisoformat(raw)
         except ValueError:
             seen = now - thr
         if now - seen >= thr:
-            ready.add(k)
-    return ready
+            suppressed[k] = stamp
+            del t1[k]
+            promoted.add(k)
+    _save_map(p1, t1)
+    _save_map(ps, suppressed)
+    return promoted
 
 
-def proc_e(new_lines: list[str], *, path_t2: Path | None = None) -> bool:
-    p2 = path_t2 or PATH_T2
-    old = _load_lines(p2)
-    return new_lines != old
+def proc_diff(
+    current_keys: set[str],
+    *,
+    path_t2: Path | None = None,
+    failed_scope: set[tuple[str, str]] | None = None,
+) -> tuple[set[str], set[str], set[str]]:
+    """Return (added, removed, old_snapshot). failed_scope keys are not treated as removed."""
+    old = set(_load_lines(path_t2 or PATH_T2))
+    failed = failed_scope or set()
+    added = set(current_keys) - old
+    removed = {
+        k for k in (old - current_keys) if not _key_in_failed(k, failed)
+    }
+    return added, removed, old
+
+
+def should_send(
+    added: set[str],
+    removed: set[str],
+    suppressed: dict[str, str] | set[str],
+) -> bool:
+    """True if non-suppressed added/removed remain."""
+    sup = set(suppressed)
+    return bool((added - sup) or (removed - sup))
 
 
 def proc_f(lines: list[str], *, path_t2: Path | None = None) -> None:
     _save_lines(path_t2 or PATH_T2, lines)
+
+
+def snapshot_for_t2(
+    current_keys: set[str],
+    old: set[str],
+    failed_scope: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Persist current keys, keeping failed-scope keys from the previous snapshot."""
+    failed = failed_scope or set()
+    out = set(current_keys)
+    for k in old:
+        if _key_in_failed(k, failed):
+            out.add(k)
+    return sorted(out)
+
+
+def _http_client(**kwargs: Any) -> httpx.Client:
+    headers = {"User-Agent": _UA}
+    extra = kwargs.pop("headers", None)
+    if extra:
+        headers = {**headers, **dict(extra)}
+    return httpx.Client(headers=headers, **kwargs)
 
 
 def _get_json(client: httpx.Client, url: str, params: dict[str, str]) -> Any:
@@ -226,6 +551,22 @@ def fetch_a(
     return list(cal)
 
 
+def _area_blocks(areas_raw: list[Any]) -> dict[Any, list[Any]]:
+    out: dict[Any, list[Any]] = {}
+    for a in areas_raw:
+        if not isinstance(a, dict):
+            continue
+        aid = a.get("areaId")
+        if aid is None:
+            continue
+        blocks = a.get("blocks")
+        if not isinstance(blocks, list):
+            blocks = []
+        out[aid] = blocks
+        out[str(aid)] = blocks
+    return out
+
+
 def fetch_b(
     client: httpx.Client,
     base: str,
@@ -233,9 +574,10 @@ def fetch_b(
     fid: int,
     sid: int,
     days: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[dict[Any, list[Any]], list[dict[str, Any]]]:
+    empty: tuple[dict[Any, list[Any]], list[dict[str, Any]]] = ({}, [])
     if not days:
-        return []
+        return empty
     fac = json.dumps(
         [{"facilityId": fid, "spaces": [{"spaceId": sid, "selectedDates": days}]}],
         separators=(",", ":"),
@@ -261,11 +603,16 @@ def fetch_b(
     )
     data = payload.get("data") or []
     if not data:
-        return []
-    spaces = (data[0] or {}).get("spaces") or []
+        return empty
+    row0 = data[0] or {}
+    spaces = row0.get("spaces") or []
     if not spaces:
-        return []
-    return list((spaces[0] or {}).get("timeTable") or [])
+        return empty
+    space0 = spaces[0] or {}
+    areas_raw = space0.get("areas") or row0.get("areas") or []
+    ablocks = _area_blocks(list(areas_raw))
+    table = list(space0.get("timeTable") or [])
+    return ablocks, table
 
 
 def _parse_day(s: str) -> date:
@@ -279,11 +626,12 @@ def collect_one(
     item: dict[str, Any],
     start: date,
     end: date,
-) -> set[str]:
+) -> tuple[set[str], set[tuple[str, str]]]:
     code = str(item["code"])
     fid = int(item["fid"])
     sid = int(item["sid"])
     keys: set[str] = set()
+    failed: set[tuple[str, str]] = set()
     ok_days: list[str] = []
 
     for month_start in helper_6(start, end):
@@ -291,6 +639,7 @@ def collect_one(
             rows = fetch_a(client, base, tenant, month_start, fid, sid)
         except Exception:
             logger.exception("fetch_a failed code=%s month=%s", code, month_start)
+            failed.add((code, f"{month_start.year:04d}-{month_start.month:02d}"))
             continue
         for row in rows:
             try:
@@ -314,9 +663,10 @@ def collect_one(
     for ds in ok_days:
         d = _parse_day(ds)
         try:
-            table = fetch_b(client, base, tenant, fid, sid, [ds])
+            amap, table = fetch_b(client, base, tenant, fid, sid, [ds])
         except Exception:
             logger.exception("fetch_b failed code=%s day=%s", code, ds)
+            failed.add((code, ds))
             continue
         for cell in table:
             tstr = str(cell.get("timeString", "")).strip()
@@ -325,12 +675,12 @@ def collect_one(
             details = cell.get("details") or []
             if not details:
                 continue
-            if (details[0] or {}).get("status") != _ST_OK:
+            if not helper_7(list(details), amap):
                 continue
             if not helper_5(d, tstr):
                 continue
             keys.add(f"{code}|{ds} {tstr}")
-    return keys
+    return keys, failed
 
 
 def collect_all(
@@ -340,11 +690,66 @@ def collect_all(
     items: list[dict[str, Any]],
     start: date,
     end: date,
-) -> set[str]:
+) -> tuple[set[str], set[tuple[str, str]]]:
     out: set[str] = set()
+    failed: set[tuple[str, str]] = set()
     for item in items:
-        out |= collect_one(client, base, tenant, item, start, end)
-    return out
+        part, fail = collect_one(client, base, tenant, item, start, end)
+        out |= part
+        failed |= fail
+    return out, failed
+
+
+def _venue_months_all_failed(
+    code: str,
+    failed: set[tuple[str, str]],
+    months: list[date],
+) -> bool:
+    if not months:
+        return False
+    for ms in months:
+        tag = f"{ms.year:04d}-{ms.month:02d}"
+        if (code, tag) not in failed:
+            return False
+    return True
+
+
+def is_overall_fail(
+    items: list[dict[str, Any]],
+    failed: set[tuple[str, str]],
+    start: date,
+    end: date,
+    *,
+    base_url: str,
+    tenant: str,
+) -> bool:
+    """True when site config missing or every venue failed all month fetches."""
+    if not base_url or not tenant:
+        return True
+    if not items:
+        return False
+    months = helper_6(start, end)
+    if not months:
+        return False
+    return all(
+        _venue_months_all_failed(str(it["code"]), failed, months) for it in items
+    )
+
+
+def _apply_fail_watch(
+    ok: bool,
+    *,
+    path_fail: Path,
+    send: bool,
+) -> tuple[int, bool]:
+    from core.fail_watch import apply_outcome
+    from core.notifier import send_alert_msg
+
+    n, alert = apply_outcome(ok, path_fail)
+    mailed_alert = False
+    if alert and send:
+        mailed_alert = bool(send_alert_msg(n))
+    return n, mailed_alert
 
 
 def run_task(
@@ -356,46 +761,127 @@ def run_task(
     tenant: str | None = None,
     path_t1: Path | None = None,
     path_t2: Path | None = None,
+    path_sup: Path | None = None,
+    path_fail: Path | None = None,
+    path_daily_sent: Path | None = None,
     send: bool = True,
+    force_mail: bool = False,
 ) -> dict[str, Any]:
     from core.notifier import send_msg
 
-    cur = now or datetime.now()
+    if now is None:
+        cur = now_tokyo()
+    elif now.tzinfo is not None:
+        cur = now.astimezone(TZ_TOKYO).replace(tzinfo=None)
+    else:
+        cur = now
     day0 = cur.date()
     end = helper_4(cur)
     base_url = (base if base is not None else os.getenv("CFG_B1", "")).strip()
     ten = (tenant if tenant is not None else os.getenv("CFG_B2", "")).strip()
     cfg_items = items if items is not None else load_cfg()
+    p1 = path_t1 or PATH_T1
+    p2 = path_t2 or PATH_T2
+    ps = path_sup or PATH_SUP
+    pf = path_fail or PATH_FAIL
+    pdaily = path_daily_sent or PATH_DAILY_SENT
 
-    own_client = client is None
-    http = client or httpx.Client()
+    daily_first = is_daily_first_send(day0, pdaily)
+    force_mail = bool(force_mail) or daily_first
+
+    overall_ok = False
     try:
-        if not base_url or not ten:
-            logger.error("CFG_B1 / CFG_B2 missing")
-            keys: set[str] = set()
-        else:
-            keys = collect_all(http, base_url, ten, cfg_items, day0, end)
-    finally:
-        if own_client:
-            http.close()
+        own_client = client is None
+        http = client or _http_client()
+        failed: set[tuple[str, str]] = set()
+        try:
+            if not base_url or not ten:
+                logger.error("CFG_B1 / CFG_B2 missing")
+                keys: set[str] = set()
+            else:
+                keys, failed = collect_all(http, base_url, ten, cfg_items, day0, end)
+        finally:
+            if own_client:
+                http.close()
 
-    proc_b(keys, cur, path_t1=path_t1)
-    ready = proc_c(keys, cur, path_t1=path_t1)
-    lines = sorted(ready)
-    changed = proc_e(lines, path_t2=path_t2)
-    mailed = False
-    if changed and send:
-        mailed = send_msg(lines, bool(lines), when=day0)
-        if mailed:
-            proc_f(lines, path_t2=path_t2)
-    elif changed and not send:
-        proc_f(lines, path_t2=path_t2)
+        proc_b(keys, cur, path_t1=p1, path_sup=ps, failed_scope=failed)
+        proc_promote(keys, cur, path_t1=p1, path_sup=ps)
+        added, removed, old = proc_diff(keys, path_t2=p2, failed_scope=failed)
+        suppressed = _load_map(ps)
+        changed = should_send(added, removed, suppressed)
+        lines = sorted(keys)
+        mailed = False
+        want_mail = changed or force_mail
+        if want_mail and send:
+            # Full snapshot + Calendar blocks (send_msg load_cal defaults True).
+            mailed = bool(
+                send_msg(
+                    lines,
+                    bool(lines),
+                    when=day0,
+                    scan_end=end,
+                    suppressed=set(suppressed),
+                    added=set(added),
+                )
+            )
+            if mailed:
+                # Only real change events refresh t2; force-only mail does not.
+                if changed:
+                    proc_f(snapshot_for_t2(keys, old, failed), path_t2=p2)
+                if daily_first:
+                    save_daily_sent_date(day0, pdaily)
+            else:
+                logger.error(
+                    "mail decided but SMTP failed "
+                    "(changed=%s force_mail=%s daily_first=%s mailed=False)",
+                    changed,
+                    force_mail,
+                    daily_first,
+                )
+        elif changed and not send:
+            proc_f(snapshot_for_t2(keys, old, failed), path_t2=p2)
 
+        overall_ok = not is_overall_fail(
+            cfg_items,
+            failed,
+            day0,
+            end,
+            base_url=base_url,
+            tenant=ten,
+        )
+    except Exception:
+        _apply_fail_watch(False, path_fail=pf, send=send)
+        raise
+
+    fail_n, fail_alert = _apply_fail_watch(overall_ok, path_fail=pf, send=send)
+    logger.info(
+        "keys=%s added=%s removed=%s changed=%s mailed=%s",
+        len(keys),
+        len(added),
+        len(removed),
+        changed,
+        mailed,
+    )
+    if changed and mailed:
+        changes_logger.info(
+            "keys=%s added=%s removed=%s changed=%s mailed=%s",
+            len(keys),
+            len(added),
+            len(removed),
+            changed,
+            mailed,
+        )
     return {
         "keys": keys,
-        "ready": ready,
+        "ready": keys,
         "lines": lines,
+        "added": added,
+        "removed": removed,
         "changed": changed,
         "mailed": mailed,
         "end": end.isoformat(),
+        "failed": failed,
+        "overall_ok": overall_ok,
+        "fail_count": fail_n,
+        "fail_alert": fail_alert,
     }

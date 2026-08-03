@@ -1,3 +1,14 @@
 {
-  "items": []
+  "v01": {"fid": 9, "sid": 48, "type": "gym"},
+  "v02": {"fid": 11, "sid": 66, "type": "gym"},
+  "v03": {"fid": 14, "sid": 88, "type": "gym"},
+  "v04": {"fid": 45, "sid": 288, "type": "hall"},
+  "v05": {"fid": 21, "sid": 142, "type": "hall"},
+  "v06": {"fid": 41, "sid": 268, "type": "hall"},
+  "v07": {"fid": 50, "sid": 327, "type": "hall"},
+  "v08": {"fid": 26, "sid": 181, "type": "hall"},
+  "v09": {"fid": 29, "sid": 206, "type": "hall"},
+  "v10": {"fid": 28, "sid": 197, "type": "hall"},
+  "v11": {"fid": 27, "sid": 187, "type": "hall"},
+  "v12": {"fid": 25, "sid": 171, "type": "hall"}
 }

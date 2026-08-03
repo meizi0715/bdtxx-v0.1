@@ -1,9 +1,0 @@
-{
-  "credentials_path": "credentials/cal.json",
-  "timezone": "Asia/Tokyo",
-  "calendars": [],
-  "event_defaults": {
-    "summary_template": "{code}",
-    "description_template": "{code} {t}"
-  }
-}
