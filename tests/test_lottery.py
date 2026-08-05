@@ -110,12 +110,95 @@ class TestFaceFilterAndExtract:
         assert faces[32] == "B"
         assert faces[33] == "C"
 
-    def test_extract_records_count_regardless_of_status(self) -> None:
-        """Calendar may say available while spaceTime still has lottery counts."""
+    def test_all_unavailable_day_excluded(self) -> None:
         areas = self._gym_areas()
         table = [
             {
-                "timeString": "19:00-21:00",
+                "timeString": f"{h:02d}:00-{h + 2:02d}:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                ],
+            }
+            for h in (9, 11, 13, 15, 17, 19)
+        ]
+        # Saturday so time filter keeps all six slots
+        rows = lot.extract_entries(
+            "v03", date(2026, 10, 4), areas, table, "gym"
+        )
+        assert rows == []
+
+    def test_partial_available_keeps_only_available(self) -> None:
+        areas = self._gym_areas()
+        table = [
+            {
+                "timeString": "09:00-11:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "available",
+                        "lotteryWaitingCount": 2,
+                    },
+                ],
+            },
+            {
+                "timeString": "11:00-13:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "available",
+                        "lotteryWaitingCount": 1,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                ],
+            },
+            {
+                "timeString": "13:00-15:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                ],
+            },
+        ]
+        rows = lot.extract_entries(
+            "v03", date(2026, 10, 4), areas, table, "gym"
+        )
+        by_key = {(r.time_string, r.face, r.count) for r in rows}
+        assert by_key == {
+            ("09:00-11:00", "B", 2),
+            ("11:00-13:00", "A", 1),
+        }
+
+    def test_all_available_day_kept_complete(self) -> None:
+        areas = self._gym_areas()
+        table = [
+            {
+                "timeString": "17:00-19:00",
                 "details": [
                     {
                         "areaId": 1,
@@ -129,7 +212,7 @@ class TestFaceFilterAndExtract:
                     },
                     {
                         "areaId": 3,
-                        "status": "lottery",
+                        "status": "available",
                         "lotteryWaitingCount": 3,
                     },
                 ],
@@ -139,8 +222,7 @@ class TestFaceFilterAndExtract:
             "v01", date(2026, 10, 5), areas, table, "gym"
         )
         by_face = {(r.face, r.count) for r in rows}
-        assert ("A", 0) in by_face
-        assert ("B", 3) in by_face
+        assert by_face == {("A", 0), ("B", 3)}
         assert all(r.count != 99 for r in rows)
 
 
@@ -151,7 +233,11 @@ class TestSlotDayFilter:
             {
                 "timeString": f"{h:02d}:00-{h + 2:02d}:00",
                 "details": [
-                    {"areaId": 11, "status": "lottery", "lotteryWaitingCount": 0}
+                    {
+                        "areaId": 11,
+                        "status": "available",
+                        "lotteryWaitingCount": 0,
+                    }
                 ],
             }
             for h in hours

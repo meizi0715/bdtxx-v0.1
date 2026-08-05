@@ -170,7 +170,11 @@ def extract_entries(
     table: list[dict[str, Any]],
     venue_type: str,
 ) -> list[LotteryEntry]:
-    """Pull lotteryWaitingCount for shared faces; ignore status strings."""
+    """Pull lotteryWaitingCount for shared faces with status==available only.
+
+    When unauthenticated, available ≡ drawable lottery slot; unavailable is
+    truly closed. Other labels (e.g. lottery) do not appear without login.
+    """
     faces = shared_face_map(areas_raw, venue_type)
     if not faces:
         return []
@@ -188,6 +192,8 @@ def extract_entries(
             continue
         for det in details:
             if not isinstance(det, dict):
+                continue
+            if str(det.get("status") or "").strip() != "available":
                 continue
             aid = det.get("areaId")
             face = faces.get(aid)
