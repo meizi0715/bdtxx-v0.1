@@ -196,6 +196,7 @@ class TestFaceFilterAndExtract:
 
     def test_all_available_day_kept_complete(self) -> None:
         areas = self._gym_areas()
+        # Weekday needs 19 available to keep 17; both slots fully available.
         table = [
             {
                 "timeString": "17:00-19:00",
@@ -216,13 +217,33 @@ class TestFaceFilterAndExtract:
                         "lotteryWaitingCount": 3,
                     },
                 ],
-            }
+            },
+            {
+                "timeString": "19:00-21:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "available",
+                        "lotteryWaitingCount": 1,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "available",
+                        "lotteryWaitingCount": 2,
+                    },
+                ],
+            },
         ]
         rows = lot.extract_entries(
             "v01", date(2026, 10, 5), areas, table, "gym"
         )
-        by_face = {(r.face, r.count) for r in rows}
-        assert by_face == {("A", 0), ("B", 3)}
+        by_key = {(r.time_string, r.face, r.count) for r in rows}
+        assert by_key == {
+            ("17:00-19:00", "A", 0),
+            ("17:00-19:00", "B", 3),
+            ("19:00-21:00", "A", 1),
+            ("19:00-21:00", "B", 2),
+        }
         assert all(r.count != 99 for r in rows)
 
 
@@ -246,8 +267,15 @@ class TestSlotDayFilter:
     def _areas(self) -> list[dict]:
         return [{"areaId": 11, "blocks": [1]}]
 
+    def _gym_areas(self) -> list[dict]:
+        return [
+            {"areaId": 1, "blocks": [1, 2]},
+            {"areaId": 2, "blocks": [1]},
+            {"areaId": 3, "blocks": [2]},
+        ]
+
     def test_weekday_only_17_and_19(self) -> None:
-        # 2026-10-05 Monday (not a JP holiday)
+        # 2026-10-05 Monday (not a JP holiday); 19 available → keep 17+19
         day = date(2026, 10, 5)
         assert day.weekday() < 5
         rows = lot.extract_entries(
@@ -256,6 +284,90 @@ class TestSlotDayFilter:
         hours = sorted({lot._start_hour(r.time_string) for r in rows})
         assert hours == [17, 19]
         assert len(rows) == 2
+
+    def test_weekday_19_available_keeps_17_and_19(self) -> None:
+        day = date(2026, 10, 5)  # Monday
+        assert day.weekday() < 5
+        table = [
+            {
+                "timeString": "17:00-19:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "available",
+                        "lotteryWaitingCount": 4,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                ],
+            },
+            {
+                "timeString": "19:00-21:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "available",
+                        "lotteryWaitingCount": 1,
+                    },
+                ],
+            },
+        ]
+        rows = lot.extract_entries(
+            "v03", day, self._gym_areas(), table, "gym"
+        )
+        by_key = {(r.time_string, r.face, r.count) for r in rows}
+        assert by_key == {
+            ("17:00-19:00", "A", 4),
+            ("19:00-21:00", "B", 1),
+        }
+
+    def test_weekday_19_unavailable_drops_17(self) -> None:
+        day = date(2026, 10, 5)  # Monday
+        assert day.weekday() < 5
+        table = [
+            {
+                "timeString": "17:00-19:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "available",
+                        "lotteryWaitingCount": 7,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "available",
+                        "lotteryWaitingCount": 8,
+                    },
+                ],
+            },
+            {
+                "timeString": "19:00-21:00",
+                "details": [
+                    {
+                        "areaId": 2,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                    {
+                        "areaId": 3,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    },
+                ],
+            },
+        ]
+        rows = lot.extract_entries(
+            "v03", day, self._gym_areas(), table, "gym"
+        )
+        assert rows == []
 
     def test_weekend_keeps_all_six(self) -> None:
         # 2026-10-10 Saturday
@@ -267,6 +379,51 @@ class TestSlotDayFilter:
         hours = sorted({lot._start_hour(r.time_string) for r in rows})
         assert hours == [9, 11, 13, 15, 17, 19]
         assert len(rows) == 6
+
+    def test_weekend_keeps_17_even_without_19_available(self) -> None:
+        """Weekend/holiday must not apply the weekday 19→17 gate."""
+        day = date(2026, 10, 10)  # Saturday
+        assert day.weekday() >= 5
+        table = [
+            {
+                "timeString": "09:00-11:00",
+                "details": [
+                    {
+                        "areaId": 11,
+                        "status": "available",
+                        "lotteryWaitingCount": 1,
+                    }
+                ],
+            },
+            {
+                "timeString": "17:00-19:00",
+                "details": [
+                    {
+                        "areaId": 11,
+                        "status": "available",
+                        "lotteryWaitingCount": 2,
+                    }
+                ],
+            },
+            {
+                "timeString": "19:00-21:00",
+                "details": [
+                    {
+                        "areaId": 11,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    }
+                ],
+            },
+        ]
+        rows = lot.extract_entries(
+            "v08", day, self._areas(), table, "hall"
+        )
+        by_key = {(r.time_string, r.count) for r in rows}
+        assert by_key == {
+            ("09:00-11:00", 1),
+            ("17:00-19:00", 2),
+        }
 
     def test_holiday_weekday_keeps_all_six(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Force a Monday to be treated as holiday via jpholiday path in helper_3
@@ -281,6 +438,43 @@ class TestSlotDayFilter:
         hours = sorted({lot._start_hour(r.time_string) for r in rows})
         assert hours == [9, 11, 13, 15, 17, 19]
         assert len(rows) == 6
+
+    def test_holiday_keeps_17_even_without_19_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        day = date(2026, 10, 5)  # Monday forced to holiday
+        assert day.weekday() < 5
+        monkeypatch.setattr(
+            "core.scanner.jpholiday.is_holiday", lambda d: d == day
+        )
+        table = [
+            {
+                "timeString": "17:00-19:00",
+                "details": [
+                    {
+                        "areaId": 11,
+                        "status": "available",
+                        "lotteryWaitingCount": 3,
+                    }
+                ],
+            },
+            {
+                "timeString": "19:00-21:00",
+                "details": [
+                    {
+                        "areaId": 11,
+                        "status": "unavailable",
+                        "lotteryWaitingCount": 0,
+                    }
+                ],
+            },
+        ]
+        rows = lot.extract_entries(
+            "v08", day, self._areas(), table, "hall"
+        )
+        assert [(r.time_string, r.count) for r in rows] == [
+            ("17:00-19:00", 3)
+        ]
 
     def test_keep_slot_helper(self) -> None:
         mon = date(2026, 10, 5)

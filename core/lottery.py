@@ -156,11 +156,47 @@ def _start_hour(time_string: str) -> int | None:
 
 
 def keep_slot(day: date, time_string: str) -> bool:
-    """Weekend/holiday: all slots; weekday: only 17:00 and 19:00 starts."""
+    """Weekend/holiday: all slots; weekday: only 17:00 and 19:00 starts.
+
+    Weekday 17:00 is further gated in extract_entries: keep only when the
+    same day has at least one shared face available at 19:00.
+    """
     if helper_3(day):
         return True
     h = _start_hour(time_string)
     return h in _WEEKDAY_START_HOURS
+
+
+def _face_letter(faces: dict[Any, str], aid: Any) -> str | None:
+    face = faces.get(aid)
+    if face is None and aid is not None:
+        face = faces.get(str(aid))
+    return face
+
+
+def _is_shared_available(det: dict[str, Any], faces: dict[Any, str]) -> bool:
+    if str(det.get("status") or "").strip() != "available":
+        return False
+    return _face_letter(faces, det.get("areaId")) is not None
+
+
+def weekday_has_19_available(
+    table: list[dict[str, Any]],
+    faces: dict[Any, str],
+) -> bool:
+    """True if any shared face is available at 19:00-21:00."""
+    for cell in table:
+        if not isinstance(cell, dict):
+            continue
+        if _start_hour(str(cell.get("timeString", "")).strip()) != 19:
+            continue
+        details = cell.get("details") or []
+        if not isinstance(details, list):
+            continue
+        for det in details:
+            if isinstance(det, dict) and _is_shared_available(det, faces):
+                return True
+    return False
 
 
 def extract_entries(
@@ -174,10 +210,15 @@ def extract_entries(
 
     When unauthenticated, available ≡ drawable lottery slot; unavailable is
     truly closed. Other labels (e.g. lottery) do not appear without login.
+
+    Weekday: include 17:00 only if the same day has ≥1 shared face available
+    at 19:00; weekend/holiday keep all target slots unchanged.
     """
     faces = shared_face_map(areas_raw, venue_type)
     if not faces:
         return []
+    weekend_or_holiday = helper_3(day)
+    allow_17 = weekend_or_holiday or weekday_has_19_available(table, faces)
     rows: list[LotteryEntry] = []
     for cell in table:
         if not isinstance(cell, dict):
@@ -187,6 +228,9 @@ def extract_entries(
             continue
         if not keep_slot(day, tstr):
             continue
+        h = _start_hour(tstr)
+        if not weekend_or_holiday and h == 17 and not allow_17:
+            continue
         details = cell.get("details") or []
         if not isinstance(details, list):
             continue
@@ -195,10 +239,7 @@ def extract_entries(
                 continue
             if str(det.get("status") or "").strip() != "available":
                 continue
-            aid = det.get("areaId")
-            face = faces.get(aid)
-            if face is None and aid is not None:
-                face = faces.get(str(aid))
+            face = _face_letter(faces, det.get("areaId"))
             if face is None:
                 continue
             n = _as_nonneg_int(det.get("lotteryWaitingCount"))
