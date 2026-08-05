@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -22,33 +23,87 @@ _NAMES_PATH = _ROOT / "local" / "names.json"
 _MAIL_CONTENT_PATH = _ROOT / "local" / "mail_content.json"
 _YOBI = ("月", "火", "水", "木", "金", "土", "日")
 _TZ = ZoneInfo("Asia/Tokyo")
+_SCAN_MAIL_DEFAULTS = {"subject": "N({mmdd})", "header": "", "footer": ""}
+# Fallback only when mail_content.json / lottery key is missing — keep generic
+# so it cannot be mistaken for a hardcoded production subject.
+_LOTTERY_MAIL_DEFAULTS = {
+    "subject": "Lottery ({yyyy}-{mm})",
+    "header": "",
+}
 
 
 def _today() -> date:
     return datetime.now(_TZ).date()
 
 
-def load_mail_content(path: Path | None = None) -> dict[str, str]:
-    """Load subject/header/footer from local/mail_content.json."""
-    p = path or _MAIL_CONTENT_PATH
-    defaults = {"subject": "N({mmdd})", "header": "", "footer": ""}
-    if not p.exists():
-        logger.error("mail content missing: %s", p)
-        return dict(defaults)
+def _read_mail_content_file(path: Path) -> dict[str, Any] | None:
+    """Return parsed JSON object, or None on missing/invalid (logs already emitted)."""
+    if not path.exists():
+        return None
     try:
-        with p.open(encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             raw = json.load(f)
     except (json.JSONDecodeError, OSError):
-        logger.exception("mail content load failed: %s", p)
-        return dict(defaults)
+        logger.exception("mail content load failed: %s", path)
+        return None
     if not isinstance(raw, dict):
-        return dict(defaults)
-    footer = str(raw.get("footer", "")).strip("\n")
+        logger.warning("mail content invalid (not an object): %s", path)
+        return None
+    return raw
+
+
+def load_mail_content(path: Path | None = None) -> dict[str, str]:
+    """Load scan subject/header/footer from local/mail_content.json["scan"]."""
+    p = path or _MAIL_CONTENT_PATH
+    defaults = dict(_SCAN_MAIL_DEFAULTS)
+    raw = _read_mail_content_file(p)
+    if raw is None:
+        if not p.exists():
+            logger.error("mail content missing: %s", p)
+        return defaults
+    scan = raw.get("scan")
+    if not isinstance(scan, dict):
+        logger.warning(
+            "mail content missing 'scan' key: %s (using scan defaults)", p
+        )
+        return defaults
+    footer = str(scan.get("footer", "")).strip("\n")
     return {
-        "subject": str(raw.get("subject", defaults["subject"])),
-        "header": str(raw.get("header", "")),
+        "subject": str(scan.get("subject", defaults["subject"])),
+        "header": str(scan.get("header", "")),
         "footer": footer,
     }
+
+
+def load_lottery_mail_content(path: Path | None = None) -> dict[str, str]:
+    """Load lottery subject/header from local/mail_content.json["lottery"]."""
+    p = path or _MAIL_CONTENT_PATH
+    defaults = dict(_LOTTERY_MAIL_DEFAULTS)
+    raw = _read_mail_content_file(p)
+    if raw is None:
+        if not p.exists():
+            logger.warning(
+                "mail content missing: %s (using lottery defaults)", p
+            )
+        return defaults
+    lottery = raw.get("lottery")
+    if not isinstance(lottery, dict):
+        logger.warning(
+            "mail content missing 'lottery' key: %s (using lottery defaults)", p
+        )
+        return defaults
+    return {
+        "subject": str(lottery.get("subject") or defaults["subject"]),
+        "header": str(lottery.get("header", "")),
+    }
+
+
+def _apply_yyyy_mm(text: str, year: int, month: int) -> str:
+    return (
+        str(text)
+        .replace("{yyyy}", str(year))
+        .replace("{mm}", str(month))
+    )
 
 
 def load_names(path: Path | None = None) -> dict[str, dict[str, str]]:
@@ -363,9 +418,10 @@ def build_mail_subject(
     template: dict[str, str] | None = None,
     template_path: Path | None = None,
 ) -> str:
+    """Build scan mail subject from mail_content.json["scan"]["subject"] (+ {mmdd})."""
     tmpl = template if template is not None else load_mail_content(template_path)
     d = when or _today()
-    return _apply_mmdd(str(tmpl.get("subject", "N({mmdd})")), d)
+    return _apply_mmdd(str(tmpl.get("subject", _SCAN_MAIL_DEFAULTS["subject"])), d)
 
 
 def _recipients(raw: str) -> list[str]:
@@ -540,3 +596,171 @@ def send_text_msg(subject: str, body: str) -> bool:
         print(f"SMTP send failed: {type(e).__name__}: {e}")
         logger.exception("send_text failed")
         return False
+
+
+def build_lottery_subject(
+    year: int,
+    month: int,
+    *,
+    template: dict[str, str] | None = None,
+    template_path: Path | None = None,
+) -> str:
+    """Build lottery subject from mail_content.json["lottery"]["subject"] (+ {yyyy}/{mm})."""
+    tmpl = (
+        template
+        if template is not None
+        else load_lottery_mail_content(template_path)
+    )
+    return _apply_yyyy_mm(
+        str(tmpl.get("subject", _LOTTERY_MAIL_DEFAULTS["subject"])),
+        year,
+        month,
+    )
+
+
+def _fmt_day_lottery(d: date) -> str:
+    return f"{d.month}月{d.day}日({_YOBI[d.weekday()]})"
+
+
+def lottery_start_hh(time_string: str) -> str:
+    """Return zero-padded start hour from '09:00-11:00' / '9:00～11:00' → '09'."""
+    raw = str(time_string or "").strip()
+    start = re.split(r"\s*[-～~]\s*", raw, maxsplit=1)[0].strip()
+    m = re.match(r"(\d{1,2})", start)
+    if not m:
+        return start
+    return f"{int(m.group(1)):02d}"
+
+
+def _fmt_lottery_day_line(
+    day: date,
+    slot_map: dict[str, dict[str, int]],
+    faces: list[str],
+    *,
+    starred: bool = False,
+) -> str:
+    """Build one day line; ``slot_map`` is hour → {face → count}."""
+    multi = len(faces) >= 2
+    chunks: list[str] = []
+    for hh in sorted(slot_map.keys(), key=lambda x: int(x)):
+        face_counts = slot_map[hh]
+        if multi:
+            inner = "/".join(f"{f}{face_counts[f]}" for f in faces if f in face_counts)
+            if not inner:
+                continue
+            chunks.append(f"{hh}({inner})")
+        else:
+            # single face: only the count
+            if not face_counts:
+                continue
+            n = next(iter(face_counts.values()))
+            chunks.append(f"{hh}({n})")
+    line = f"・{_fmt_day_lottery(day)} {'、'.join(chunks)}"
+    if starred:
+        line += "(★)"
+    return line
+
+
+def _day_slot_changed(
+    code: str,
+    day: date,
+    slot_map: dict[str, dict[str, int]],
+    previous: dict[str, int] | None,
+) -> bool:
+    """True if any slot/face on this day differs from previous snapshot."""
+    if previous is None:
+        return False
+    day_s = day.isoformat()
+    # any current value different / new
+    for hh, face_counts in slot_map.items():
+        for face, count in face_counts.items():
+            k = f"{code}|{day_s}|{hh}|{face}"
+            if previous.get(k) != count:
+                return True
+    # any previous key for this day missing from current
+    prefix = f"{code}|{day_s}|"
+    current_keys = {
+        f"{code}|{day_s}|{hh}|{face}"
+        for hh, face_counts in slot_map.items()
+        for face in face_counts
+    }
+    for k in previous:
+        if str(k).startswith(prefix) and k not in current_keys:
+            return True
+    return False
+
+
+def _fmt_lottery_avail_block(
+    entries: list[Any],
+    name_map: dict[str, dict[str, str]],
+    *,
+    previous: dict[str, int] | None = None,
+) -> str:
+    by_code: dict[str, list[Any]] = defaultdict(list)
+    for e in entries:
+        by_code[str(e.code)].append(e)
+
+    parts: list[str] = ["----------抽選可能----------"]
+    order = list(name_map.keys()) if name_map else sorted(by_code.keys())
+    for code in sorted(by_code.keys()):
+        if code not in order:
+            order.append(code)
+
+    blocks: list[str] = []
+    for code in order:
+        rows = by_code.get(code) or []
+        if not rows:
+            continue
+        meta = name_map.get(code) or {}
+        title = str(meta.get("name") or code)
+        lines = [f"【{title}】"]
+
+        faces = sorted({str(r.face) for r in rows})
+        by_day: dict[date, dict[str, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
+        for r in rows:
+            hh = lottery_start_hh(str(r.time_string))
+            by_day[r.day][hh][str(r.face)] = int(r.count)
+
+        for d in sorted(by_day.keys()):
+            starred = _day_slot_changed(code, d, by_day[d], previous)
+            lines.append(
+                _fmt_lottery_day_line(d, by_day[d], faces, starred=starred)
+            )
+        blocks.append("\n".join(lines))
+
+    if blocks:
+        parts.append("\n\n".join(blocks))
+    parts.append("-----------------------------")
+    return "\n".join(parts)
+
+
+def build_lottery_body(
+    entries: list[Any],
+    *,
+    year: int,
+    month: int,
+    names: dict[str, dict[str, str]] | None = None,
+    names_path: Path | None = None,
+    template: dict[str, str] | None = None,
+    template_path: Path | None = None,
+    previous: dict[str, int] | None = None,
+) -> str:
+    """Format lottery mail body: optional header + 抽選可能 block.
+
+    When ``previous`` is provided (snapshot from lottery_prev.json), day lines
+    with any slot/face count change vs previous are suffixed with ``(★)``.
+    Pass ``previous={}`` on first run to mark all days as new.
+    """
+    name_map = names if names is not None else load_names(names_path)
+    tmpl = (
+        template
+        if template is not None
+        else load_lottery_mail_content(template_path)
+    )
+    greet = str(tmpl.get("header", "")).rstrip("\n")
+    avail = _fmt_lottery_avail_block(entries, name_map, previous=previous)
+    if greet:
+        return greet + "\n\n" + avail + "\n"
+    return avail + "\n"

@@ -1,5 +1,11 @@
 {
-  "subject": "Report ({mmdd})",
-  "header": "Hello,\n\nPlease find the report below.",
-  "footer": "----------footer----------\n・item A\n・item B\n-----------------------------"
+  "scan": {
+    "subject": "Scan report ({mmdd})",
+    "header": "Hello,\n\nPlease find the availability report below.",
+    "footer": "----------footer----------\n・item A\n・item B\n-----------------------------"
+  },
+  "lottery": {
+    "subject": "Lottery counts ({yyyy}-{mm})",
+    "header": "Hello,\n\nPlease find the lottery count report below."
+  }
 }

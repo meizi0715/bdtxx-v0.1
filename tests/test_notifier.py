@@ -223,12 +223,18 @@ class TestBuildMailBody:
         p.write_text(
             json.dumps(
                 {
-                    "subject": "S({mmdd})",
-                    "header": "H",
-                    "footer": (
-                        "----------target list----------\n"
-                        "・item A\n・item B\n-----------------------------"
-                    ),
+                    "scan": {
+                        "subject": "S({mmdd})",
+                        "header": "H",
+                        "footer": (
+                            "----------target list----------\n"
+                            "・item A\n・item B\n-----------------------------"
+                        ),
+                    },
+                    "lottery": {
+                        "subject": "L({yyyy}-{mm})",
+                        "header": "LH",
+                    },
                 },
                 ensure_ascii=False,
             ),
@@ -259,20 +265,40 @@ class TestBuildMailBody:
         assert "target list" not in body
         assert "mail content missing" in caplog.text
 
+    def test_missing_scan_key_uses_defaults(
+        self, tmp_path: Path, caplog
+    ) -> None:  # noqa: ANN001
+        p = tmp_path / "mail_content.json"
+        p.write_text(
+            json.dumps({"lottery": {"subject": "L", "header": "H"}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING"):
+            body = build_mail_body(
+                [],
+                names=_NAMES,
+                template_path=p,
+                load_cal=False,
+                venue_list="",
+            )
+        assert "missing 'scan' key" in caplog.text
+        assert "ご担当者様" not in body
+
     def test_merged_content_matches_legacy_header_and_footer(self) -> None:
-        """header/footer from mail_content.json match pre-merge sources."""
+        """header/footer from mail_content.json scan section."""
         root = Path(__file__).resolve().parents[1]
         content_path = root / "local" / "mail_content.json"
         if not content_path.exists():
             pytest.skip("local/mail_content.json not present")
         content = json.loads(content_path.read_text(encoding="utf-8"))
-        assert content["subject"] == "バトミントン予約可能時間帯({mmdd})"
-        assert content["header"] == (
+        scan = content["scan"]
+        assert scan["subject"] == "バトミントン予約可能時間帯({mmdd})"
+        assert scan["header"] == (
             "ご担当者様\n\nお疲れ様です。\n"
             "掲題の件につきまして、翌月末まで川口市各施設バトミントン予約可能時間帯を送ります。\n"
             "※対象時間帯：平日19:00~21:00、祝日/週末終日※"
         )
-        assert content["footer"] == (
+        assert scan["footer"] == (
             "----------対象施設----------\n"
             "・西公民館\n"
             "・並木公民館\n"
@@ -288,14 +314,16 @@ class TestBuildMailBody:
             "・中央ふれあい館ホール2\n"
             "-----------------------------"
         )
+        assert "lottery" in content
+        assert "{yyyy}" in content["lottery"]["subject"]
         body = build_mail_body(
             [],
             names=_NAMES,
             template_path=content_path,
             load_cal=False,
         )
-        assert body.startswith(content["header"].rstrip("\n"))
-        assert body.rstrip("\n").endswith(content["footer"])
+        assert body.startswith(scan["header"].rstrip("\n"))
+        assert body.rstrip("\n").endswith(scan["footer"])
         assert "\n\n----------対象施設----------\n" in body
         assert "・中央ふれあい館ホール1\n・中央ふれあい館ホール2\n" in body
 
