@@ -26,6 +26,7 @@ PATH_FAIL = DATA_DIR / "fail_count.json"
 PATH_DAILY_SENT = DATA_DIR / "daily_sent.json"
 PATH_LOG = DATA_DIR / "scan.log"
 PATH_BOOKING_LOG = DATA_DIR / "booking.log"
+PATH_LOTTERY_LOG = DATA_DIR / "lottery.log"
 PATH_CHANGES_LOG = DATA_DIR / "changes.log"
 PATH_CFG = ROOT / "config" / "cfg_items.json"
 
@@ -43,8 +44,10 @@ _UA = (
 )
 _LOG_READY = False
 _BOOKING_LOG_READY = False
+_LOTTERY_LOG_READY = False
 _CHANGES_LOG_READY = False
 _LOG_KEEP_DAYS = 3
+_LOTTERY_LOG_KEEP_DAYS = 30
 _CHANGES_LOG_KEEP_DAYS = 90
 _LOG_LINE_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 _LOG_FMT = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -209,6 +212,20 @@ def setup_booking_logging(level: int = logging.INFO) -> None:
         booking_step_filter=True,
     )
     _BOOKING_LOG_READY = True
+
+
+def setup_lottery_logging(level: int = logging.INFO) -> None:
+    """Console + core.lottery → data/lottery.log (idempotent)."""
+    global _LOTTERY_LOG_READY
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_console_logging(level)
+    if _LOTTERY_LOG_READY:
+        return
+    prune_log(PATH_LOTTERY_LOG, keep_days=_LOTTERY_LOG_KEEP_DAYS)
+    _attach_named_file_logger("core.lottery", PATH_LOTTERY_LOG, level=level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    _LOTTERY_LOG_READY = True
 
 
 def now_tokyo() -> datetime:
@@ -391,6 +408,54 @@ def _parse_slot_key(key: str) -> tuple[str, str] | None:
     return code.strip(), day_s
 
 
+def prune_suppressed_past(
+    data: dict[str, str],
+    *,
+    today: date | None = None,
+) -> dict[str, str]:
+    """Drop suppressed keys whose slot date is strictly before today (Tokyo)."""
+    day = today or today_tokyo()
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        parsed = _parse_slot_key(k)
+        if parsed is None:
+            out[str(k)] = str(v)
+            continue
+        try:
+            slot_day = date.fromisoformat(parsed[1])
+        except ValueError:
+            out[str(k)] = str(v)
+            continue
+        if slot_day >= day:
+            out[str(k)] = str(v)
+    return out
+
+
+def _load_suppressed(
+    path: Path | None = None,
+    *,
+    today: date | None = None,
+) -> dict[str, str]:
+    """Load suppressed map and drop past slot keys; rewrite file when pruned."""
+    p = path or PATH_SUP
+    raw = _load_map(p)
+    cleaned = prune_suppressed_past(raw, today=today)
+    if cleaned != raw:
+        _save_map(p, cleaned)
+    return cleaned
+
+
+def _save_suppressed(
+    data: dict[str, str],
+    path: Path | None = None,
+    *,
+    today: date | None = None,
+) -> None:
+    """Persist suppressed map after dropping past slot keys."""
+    p = path or PATH_SUP
+    _save_map(p, prune_suppressed_past(data, today=today))
+
+
 def _key_in_failed(key: str, failed_scope: set[tuple[str, str]]) -> bool:
     parsed = _parse_slot_key(key)
     if not parsed:
@@ -413,7 +478,7 @@ def proc_b(
 ) -> None:
     """Update first_seen (t1). Skip keys already in suppressed."""
     p1 = path_t1 or PATH_T1
-    suppressed = _load_map(path_sup or PATH_SUP)
+    suppressed = _load_suppressed(path_sup or PATH_SUP, today=now.date())
     failed = failed_scope or set()
     t1 = _load_map(p1)
     for k in list(t1.keys()):
@@ -443,7 +508,7 @@ def proc_promote(
     ps = path_sup or PATH_SUP
     thr = delta if delta is not None else DELTA_T
     t1 = _load_map(p1)
-    suppressed = _load_map(ps)
+    suppressed = _load_suppressed(ps, today=now.date())
     promoted: set[str] = set()
     stamp = now.isoformat(timespec="seconds")
     for k, raw in list(t1.items()):
@@ -458,7 +523,7 @@ def proc_promote(
             del t1[k]
             promoted.add(k)
     _save_map(p1, t1)
-    _save_map(ps, suppressed)
+    _save_suppressed(suppressed, ps, today=now.date())
     return promoted
 
 
@@ -807,7 +872,7 @@ def run_task(
         proc_b(keys, cur, path_t1=p1, path_sup=ps, failed_scope=failed)
         proc_promote(keys, cur, path_t1=p1, path_sup=ps)
         added, removed, old = proc_diff(keys, path_t2=p2, failed_scope=failed)
-        suppressed = _load_map(ps)
+        suppressed = _load_suppressed(ps, today=day0)
         changed = should_send(added, removed, suppressed)
         lines = sorted(keys)
         mailed = False

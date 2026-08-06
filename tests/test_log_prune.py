@@ -85,6 +85,48 @@ class TestPruneLog:
         assert "keep-edge" in text
         assert "keep-new" in text
 
+    def test_lottery_log_keeps_thirty_days(self, tmp_path: Path) -> None:
+        p = tmp_path / "lottery.log"
+        p.write_text(
+            "\n".join(
+                [
+                    "2026-06-01 10:00:00,000 INFO core.lottery: too-old",
+                    "2026-07-10 10:00:00,000 INFO core.lottery: keep-edge",
+                    "2026-07-31 10:00:00,000 INFO core.lottery: keep-new",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        prune_log(p, keep_days=30, now=datetime(2026, 7, 31, 12, 0, 0))
+        text = p.read_text(encoding="utf-8")
+        assert "too-old" not in text
+        assert "keep-edge" in text
+        assert "keep-new" in text
+
+
+class TestSetupLotteryLogging:
+    def test_writes_core_lottery_to_lottery_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lottery_path = tmp_path / "lottery.log"
+        monkeypatch.setattr(sc, "PATH_LOTTERY_LOG", lottery_path)
+        monkeypatch.setattr(sc, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(sc, "_LOTTERY_LOG_READY", False)
+        log = logging.getLogger("core.lottery")
+        for h in list(log.handlers):
+            log.removeHandler(h)
+            h.close()
+
+        sc.setup_lottery_logging()
+        logging.getLogger("core.lottery").info("marker-lottery-only")
+        for h in log.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.flush()
+
+        text = lottery_path.read_text(encoding="utf-8")
+        assert "marker-lottery-only" in text
+
 
 class TestSetupLogSplit:
     def test_handlers_target_separate_files(

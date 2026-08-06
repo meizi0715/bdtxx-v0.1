@@ -238,6 +238,56 @@ class TestProcState:
         assert key not in json.loads(p1.read_text(encoding="utf-8"))
         assert key in json.loads(ps.read_text(encoding="utf-8"))
 
+
+class TestSuppressedPrune:
+    def test_prune_drops_past_slot_keys(self) -> None:
+        today = date(2026, 8, 8)
+        raw = {
+            "v04|2026-08-07 09:00-11:00": "2026-08-07T10:00:00",
+            "v04|2026-08-08 09:00-11:00": "2026-08-08T10:00:00",
+            "v04|2026-08-09 09:00-11:00": "2026-08-09T10:00:00",
+        }
+        out = m.prune_suppressed_past(raw, today=today)
+        assert out == {
+            "v04|2026-08-08 09:00-11:00": "2026-08-08T10:00:00",
+            "v04|2026-08-09 09:00-11:00": "2026-08-09T10:00:00",
+        }
+
+    def test_load_suppressed_rewrites_file(self, tmp_path: Path) -> None:
+        ps = tmp_path / "sup.json"
+        ps.write_text(
+            json.dumps(
+                {
+                    "v01|2026-08-07 19:00-21:00": "2026-08-07T10:00:00",
+                    "v02|2026-08-10 19:00-21:00": "2026-08-08T10:00:00",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        loaded = m._load_suppressed(ps, today=date(2026, 8, 8))
+        assert loaded == {"v02|2026-08-10 19:00-21:00": "2026-08-08T10:00:00"}
+        on_disk = json.loads(ps.read_text(encoding="utf-8"))
+        assert on_disk == loaded
+
+    def test_proc_b_load_prunes_past_suppressed(self, tmp_path: Path) -> None:
+        p1 = tmp_path / "t1.json"
+        ps = tmp_path / "sup.json"
+        past = "v01|2026-08-07 19:00-21:00"
+        future = "v02|2026-08-10 19:00-21:00"
+        ps.write_text(
+            json.dumps(
+                {past: "2026-08-07T10:00:00", future: "2026-08-08T10:00:00"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        t0 = datetime(2026, 8, 8, 10, 0, 0)
+        m.proc_b(set(), t0, path_t1=p1, path_sup=ps)
+        on_disk = json.loads(ps.read_text(encoding="utf-8"))
+        assert past not in on_disk
+        assert future in on_disk
+
     def test_collect_records_fetch_b_failure(self) -> None:
         client = MagicMock()
 

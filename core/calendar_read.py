@@ -1,4 +1,4 @@
-"""Read-only Google Calendar helpers."""
+"""Google Calendar helpers (read for mail sections; write scope shared with sync)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Asia/Tokyo")
-_SCOPE = ("https://www.googleapis.com/auth/calendar.readonly",)
+# Full calendar scope — shared with calendar_sync (read + write).
+SCOPES = ("https://www.googleapis.com/auth/calendar",)
 _TAG_A = "予約"
 _TAG_B = "抽選"
 _GRP_A = "体育館"
@@ -27,7 +28,7 @@ def _svc(cred_path: str) -> Any:
 
     creds = service_account.Credentials.from_service_account_file(
         cred_path,
-        scopes=list(_SCOPE),
+        scopes=list(SCOPES),
     )
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 

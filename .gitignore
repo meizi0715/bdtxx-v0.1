@@ -13,3 +13,4 @@ local/names.json
 local/mail_content.json
 local/service-account.json
 local/groups.json
+local/venue_short_names.json

@@ -1,14 +1,14 @@
 {
-  "GROUP1": {"id": "example-id-1", "name": "サンプル団体A", "password": "example-password-1"},
-  "GROUP2": {"id": "example-id-2", "name": "サンプル団体B", "password": "example-password-2"},
-  "GROUP3": {"id": "example-id-3", "name": "サンプル団体C", "password": "example-password-3"},
-  "GROUP4": {"id": "example-id-4", "name": "サンプル団体D", "password": "example-password-4"},
-  "GROUP5": {"id": "example-id-5", "name": "サンプル団体E", "password": "example-password-5"},
-  "GROUP6": {"id": "example-id-6", "name": "サンプル団体F", "password": "example-password-6"},
-  "GROUP7": {"id": "example-id-7", "name": "サンプル団体G", "password": "example-password-7"},
-  "GROUP8": {"id": "example-id-8", "name": "サンプル団体H", "password": "example-password-8"},
-  "GROUP9": {"id": "example-id-9", "name": "サンプル団体I", "password": "example-password-9"},
-  "GROUP10": {"id": "example-id-10", "name": "サンプル団体J", "password": "example-password-10"},
-  "GROUP11": {"id": "example-id-11", "name": "サンプル団体K", "password": "example-password-11"},
-  "GROUP12": {"id": "example-id-12", "name": "サンプル団体L", "password": "example-password-12"}
+  "GROUP1": {"id": "example-id-1", "name": "サンプル団体A", "password": "example-password-1", "type": "gym"},
+  "GROUP2": {"id": "example-id-2", "name": "サンプル団体B", "password": "example-password-2", "type": "gym"},
+  "GROUP3": {"id": "example-id-3", "name": "サンプル団体C", "password": "example-password-3", "type": "gym"},
+  "GROUP4": {"id": "example-id-4", "name": "サンプル団体D", "password": "example-password-4", "type": "hall"},
+  "GROUP5": {"id": "example-id-5", "name": "サンプル団体E", "password": "example-password-5", "type": "hall"},
+  "GROUP6": {"id": "example-id-6", "name": "サンプル団体F", "password": "example-password-6", "type": "hall"},
+  "GROUP7": {"id": "example-id-7", "name": "サンプル団体G", "password": "example-password-7", "type": "hall"},
+  "GROUP8": {"id": "example-id-8", "name": "サンプル団体H", "password": "example-password-8", "type": "hall"},
+  "GROUP9": {"id": "example-id-9", "name": "サンプル団体I", "password": "example-password-9", "type": "hall"},
+  "GROUP10": {"id": "example-id-10", "name": "サンプル団体J", "password": "example-password-10", "type": "hall"},
+  "GROUP11": {"id": "example-id-11", "name": "サンプル団体K", "password": "example-password-11", "type": "hall"},
+  "GROUP12": {"id": "example-id-12", "name": "サンプル団体L", "password": "example-password-12", "type": "hall"}
 }

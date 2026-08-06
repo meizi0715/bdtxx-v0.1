@@ -226,6 +226,7 @@ def load_groups(path: Path | None = None) -> dict[str, dict[str, str]]:
             "id": str(val.get("id") or "").strip(),
             "name": str(val.get("name") or "").strip(),
             "password": str(val.get("password") or "").strip(),
+            "type": str(val.get("type") or "").strip(),
         }
     return out
 
@@ -1610,6 +1611,74 @@ async def _submit_login(
     raise RuntimeError("login rejected by page")
 
 
+async def login_as_group(
+    page: Page,
+    group_id: str,
+    password: str,
+    *,
+    group_name: str = "",
+    venue_name: str = "",
+    date_s: str = "",
+    time_slot: str = "",
+    wait_for_nine: bool = False,
+    wait_9am: bool = True,
+) -> None:
+    """Open login if needed, fill 団体 credentials, submit.
+
+    Shared by book_one and calendar reservation sync.
+    """
+    base = _base_url()
+    _step_log(
+        group_id,
+        venue_name,
+        "ログイン開始",
+        date_s=date_s,
+        time_slot=time_slot,
+        group_name=group_name,
+    )
+    if not _is_login_url(page.url):
+        link = page.get_by_role("link", name=re.compile("ログイン"))
+        if await link.count():
+            await _dom_click_locator(link.first)
+        else:
+            await page.goto(
+                f"{base}/login",
+                wait_until="domcontentloaded",
+                timeout=_TIMEOUT_PEAK_MS,
+            )
+        await _wait_ready(page)
+    await _prepare_group_login(
+        page,
+        group_id,
+        password,
+        venue_name=venue_name,
+        date_s=date_s,
+        time_slot=time_slot,
+        group_name=group_name,
+    )
+    if wait_for_nine and wait_9am:
+        await asyncio.to_thread(
+            wait_until_target,
+            9,
+            0,
+            group_id=group_id,
+            venue_name=venue_name,
+            date_s=date_s,
+            time_slot=time_slot,
+            group_name=group_name,
+        )
+    elif wait_for_nine and not wait_9am:
+        logger.debug("skip wait_until_target (wait_9am=False)")
+    await _submit_login(
+        page,
+        group_id=group_id,
+        venue_name=venue_name,
+        date_s=date_s,
+        time_slot=time_slot,
+        group_name=group_name,
+    )
+
+
 async def _wait_input_form(page: Page) -> None:
     """After 予約入力に進む: wait for purpose select or input URL."""
     await page.wait_for_function(
@@ -1921,58 +1990,16 @@ async def book_one(
                     await _goto_home(page)
 
                     async def _do_login(*, wait_for_nine: bool) -> None:
-                        _step_log(
-                            group_id,
-                            venue_name,
-                            "ログイン開始",
-                            date_s=date_s,
-                            time_slot=time_slot,
-                            group_name=group_name,
-                        )
-                        if not _is_login_url(page.url):
-                            link = page.get_by_role(
-                                "link", name=re.compile("ログイン")
-                            )
-                            if await link.count():
-                                await _dom_click_locator(link.first)
-                            else:
-                                await page.goto(
-                                    f"{base}/login",
-                                    wait_until="domcontentloaded",
-                                    timeout=_TIMEOUT_PEAK_MS,
-                                )
-                            await _wait_ready(page)
-                        await _prepare_group_login(
+                        await login_as_group(
                             page,
                             group_id,
                             password,
+                            group_name=group_name,
                             venue_name=venue_name,
                             date_s=date_s,
                             time_slot=time_slot,
-                            group_name=group_name,
-                        )
-                        if wait_for_nine and wait_9am:
-                            await asyncio.to_thread(
-                                wait_until_target,
-                                9,
-                                0,
-                                group_id=group_id,
-                                venue_name=venue_name,
-                                date_s=date_s,
-                                time_slot=time_slot,
-                                group_name=group_name,
-                            )
-                        elif wait_for_nine and not wait_9am:
-                            logger.debug(
-                                "skip wait_until_target (wait_9am=False)"
-                            )
-                        await _submit_login(
-                            page,
-                            group_id=group_id,
-                            venue_name=venue_name,
-                            date_s=date_s,
-                            time_slot=time_slot,
-                            group_name=group_name,
+                            wait_for_nine=wait_for_nine,
+                            wait_9am=wait_9am,
                         )
 
                     async def _browse_to_calendar() -> None:
