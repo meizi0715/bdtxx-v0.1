@@ -8,7 +8,10 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+
+from core.scanner import send_heartbeat
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +31,7 @@ def scan_daily():
 
 class TestSendHeartbeat:
     def test_calls_get_when_configured(
-        self, scan_daily, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         called: dict[str, object] = {}
 
@@ -37,35 +40,47 @@ class TestSendHeartbeat:
             called["timeout"] = timeout
             return MagicMock()
 
-        monkeypatch.setattr(scan_daily.httpx, "get", fake_get)
-        scan_daily.send_heartbeat("https://hc.example/ping")
+        monkeypatch.setattr("core.scanner.httpx.get", fake_get)
+        send_heartbeat("https://hc.example/ping")
         assert called == {"url": "https://hc.example/ping", "timeout": 10.0}
+
+    def test_uses_env_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        called: dict[str, object] = {}
+
+        def fake_get(url: str, timeout: float = 10.0):  # noqa: ANN202
+            called["url"] = url
+            return MagicMock()
+
+        monkeypatch.setenv("CFG_D2", "https://hc.example/d2")
+        monkeypatch.setattr("core.scanner.httpx.get", fake_get)
+        send_heartbeat(env_key="CFG_D2")
+        assert called["url"] == "https://hc.example/d2"
 
     def test_ping_failure_logs_warning_no_raise(
         self,
-        scan_daily,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         def boom(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
-            raise scan_daily.httpx.TimeoutException("timeout")
+            raise httpx.TimeoutException("timeout")
 
-        monkeypatch.setattr(scan_daily.httpx, "get", boom)
-        with caplog.at_level(logging.WARNING, logger=scan_daily.logger.name):
-            scan_daily.send_heartbeat("https://hc.example/ping")
+        monkeypatch.setattr("core.scanner.httpx.get", boom)
+        with caplog.at_level(logging.WARNING, logger="core.scanner"):
+            send_heartbeat("https://hc.example/ping")
         assert any("heartbeat ping failed:" in r.message for r in caplog.records)
 
     def test_missing_cfg_skips_debug(
         self,
-        scan_daily,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.delenv("CFG_D1", raising=False)
         spy = MagicMock()
-        monkeypatch.setattr(scan_daily.httpx, "get", spy)
-        with caplog.at_level(logging.DEBUG, logger=scan_daily.logger.name):
-            scan_daily.send_heartbeat()
+        monkeypatch.setattr("core.scanner.httpx.get", spy)
+        with caplog.at_level(logging.DEBUG, logger="core.scanner"):
+            send_heartbeat(env_key="CFG_D1")
         spy.assert_not_called()
         assert any("heartbeat未配置，跳过" in r.message for r in caplog.records)
 
@@ -94,7 +109,7 @@ class TestMainHeartbeat:
         ping = MagicMock()
         monkeypatch.setattr(scan_daily, "send_heartbeat", ping)
         scan_daily.main()
-        ping.assert_called_once_with()
+        ping.assert_called_once_with(env_key="CFG_D1")
 
     def test_main_skips_heartbeat_when_run_task_raises(
         self, scan_daily, monkeypatch: pytest.MonkeyPatch

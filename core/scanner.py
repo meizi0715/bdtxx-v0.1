@@ -228,6 +228,24 @@ def setup_lottery_logging(level: int = logging.INFO) -> None:
     _LOTTERY_LOG_READY = True
 
 
+def send_heartbeat(
+    ping_url: str | None = None,
+    *,
+    env_key: str = "CFG_D1",
+) -> None:
+    """GET healthcheck URL. Never raises; skips when URL unset."""
+    url = (
+        ping_url if ping_url is not None else os.getenv(env_key, "")
+    ).strip()
+    if not url:
+        logger.debug("heartbeat未配置，跳过 (%s)", env_key)
+        return
+    try:
+        httpx.get(url, timeout=10.0)
+    except Exception as e:
+        logger.warning("heartbeat ping failed: %s", e)
+
+
 def now_tokyo() -> datetime:
     """Wall-clock now in Asia/Tokyo (naive, for stamp compatibility)."""
     return datetime.now(TZ_TOKYO).replace(tzinfo=None)

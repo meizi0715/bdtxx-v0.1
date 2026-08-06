@@ -26,7 +26,7 @@ from core.calendar_sync import (  # noqa: E402
 )
 from core.stats_calendar import update_stats_calendar  # noqa: E402
 from core.notifier import check_mail_cfg, send_text_msg  # noqa: E402
-from core.scanner import setup_logging, today_tokyo  # noqa: E402
+from core.scanner import send_heartbeat, setup_logging, today_tokyo  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -53,24 +53,8 @@ def _maybe_send_summary(state: dict, total: int) -> None:
         logger.error("summary mail send failed; will retry next run")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--group-ref",
-        default="",
-        metavar="REF",
-        help=(
-            "Force sync this group_ref (e.g. GROUP1), even if already in "
-            "today's done list. Still updates attempts/done and may send "
-            "the daily summary when finish conditions are met."
-        ),
-    )
-    args = parser.parse_args()
-    force_ref = str(args.group_ref or "").strip()
-
-    load_dotenv(ROOT / ".env")
-    setup_logging()
-
+def _run(force_ref: str) -> None:
+    """Run one sync attempt / quiet exit. May raise SystemExit on bad config."""
     today = today_tokyo()
     state = load_sync_state(PATH_SYNC_STATE, today=today)
 
@@ -131,6 +115,29 @@ def main() -> None:
     # Re-check finish condition after this attempt
     state = load_sync_state(PATH_SYNC_STATE, today=today)
     _maybe_send_summary(state, total)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--group-ref",
+        default="",
+        metavar="REF",
+        help=(
+            "Force sync this group_ref (e.g. GROUP1), even if already in "
+            "today's done list. Still updates attempts/done and may send "
+            "the daily summary when finish conditions are met."
+        ),
+    )
+    args = parser.parse_args()
+    force_ref = str(args.group_ref or "").strip()
+
+    load_dotenv(ROOT / ".env")
+    setup_logging()
+    _run(force_ref)
+    # Normal completion (including quiet/finished early exits). Not reached on
+    # uncaught exceptions / SystemExit from bad config.
+    send_heartbeat(env_key="CFG_D2")
 
 
 if __name__ == "__main__":
