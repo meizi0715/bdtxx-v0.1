@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import date, datetime, time, timedelta
@@ -178,56 +179,74 @@ def get_matched(
     )
 
 
-def _grp_key(shisetu: str) -> str | None:
-    if not shisetu:
-        return None
-    head = shisetu[0]
-    if head == "体":
-        return _GRP_A
-    if head == "公":
-        return _GRP_B
-    return None
+def _cfg_stats(
+    cred_path: str | None = None,
+    cal_stats: str | None = None,
+) -> tuple[str, str]:
+    path = (cred_path if cred_path is not None else os.getenv("CFG_C1", "")).strip()
+    cid = (
+        cal_stats if cal_stats is not None else os.getenv("CFG_C4", "")
+    ).strip()
+    if not path or not cid:
+        raise RuntimeError("CFG_C1 / CFG_C4 missing")
+    return path, cid
 
 
-def _session_n(raw: Any) -> int:
-    if raw is None or raw == "":
-        return 1
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
-        return 1
-    return n if n > 0 else 1
+def _parse_stats_rows(raw: Any) -> list[CountRow]:
+    """Parse gym/hall JSON (or list) into sorted (name, count) rows."""
+    data = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(data, list):
+        return []
+    rows: list[CountRow] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            n = int(item.get("count"))
+        except (TypeError, ValueError):
+            continue
+        if n < 0:
+            continue
+        rows.append((name, n))
+    rows.sort(key=lambda x: (x[1], x[0]))
+    return rows
 
 
 def get_counts(
     months: list[MonthKey],
     *,
     cred_path: str | None = None,
-    cal_a: str | None = None,
-    cal_b: str | None = None,
+    cal_stats: str | None = None,
     svc: Any | None = None,
 ) -> CountMap:
-    path, id_a, id_b = _cfg(cred_path, cal_a, cal_b)
+    """Read monthly reservation counts from CFG_C4 stats events (demand 5)."""
+    path, cid_stats = _cfg_stats(cred_path, cal_stats)
     client = svc if svc is not None else _svc(path)
     out: CountMap = {}
     for year, month in months:
-        bucket: dict[str, dict[str, int]] = {_GRP_A: {}, _GRP_B: {}}
-        for cal_id in (id_a, id_b):
-            for ev in _list_month(client, cal_id, year, month):
-                priv = (ev.get("extendedProperties") or {}).get("private") or {}
-                if not isinstance(priv, dict):
-                    continue
-                name = str(priv.get("name") or "").strip()
-                if not name:
-                    continue
-                gk = _grp_key(str(priv.get("shisetu") or "").strip())
-                if not gk:
-                    continue
-                n = _session_n(priv.get("session_count"))
-                bucket[gk][name] = bucket[gk].get(name, 0) + n
-        month_out: dict[str, list[CountRow]] = {}
-        for gk in (_GRP_A, _GRP_B):
-            pairs = sorted(bucket[gk].items(), key=lambda x: (x[1], x[0]))
-            month_out[gk] = [(n, c) for n, c in pairs]
+        month_key = f"{year:04d}-{month:02d}"
+        month_out: dict[str, list[CountRow]] = {_GRP_A: [], _GRP_B: []}
+        for ev in _list_month(client, cid_stats, year, month):
+            priv = (ev.get("extendedProperties") or {}).get("private") or {}
+            if not isinstance(priv, dict):
+                continue
+            if str(priv.get("stats_kind") or "") != "monthly_reservation_stats":
+                continue
+            if str(priv.get("stats_month") or "") != month_key:
+                continue
+            month_out[_GRP_A] = _parse_stats_rows(priv.get("gym"))
+            month_out[_GRP_B] = _parse_stats_rows(priv.get("hall"))
+            break
         out[(year, month)] = month_out
     return out

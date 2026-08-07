@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import json
 import logging
 import os
 from collections import defaultdict
@@ -134,6 +135,18 @@ def _line_items(
         items.append((cnt, initial))
     items.sort(key=lambda x: (x[0], x[1]))
     return items
+
+
+def build_stats_structured_rows(
+    groups: dict[str, dict[str, str]],
+    venue_type: str,
+    counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Structured rows for CFG_C4 private props (same order as description)."""
+    return [
+        {"name": init, "count": cnt}
+        for cnt, init in _line_items(groups, venue_type, counts)
+    ]
 
 
 def format_stats_description(
@@ -281,6 +294,8 @@ def upsert_month_stats(
         year, month, gmap, gym_counts, hall_counts
     )
     title = stats_event_title(month)
+    gym_rows = build_stats_structured_rows(gmap, "gym", gym_counts)
+    hall_rows = build_stats_structured_rows(gmap, "hall", hall_counts)
 
     start_d, end_d = _stats_event_dates(year, month)
     payload = {
@@ -292,15 +307,20 @@ def upsert_month_stats(
             "private": {
                 "stats_kind": _STATS_KIND,
                 "stats_month": month_key,
+                # Calendar private props are string-valued; store JSON arrays.
+                "gym": json.dumps(gym_rows, ensure_ascii=False),
+                "hall": json.dumps(hall_rows, ensure_ascii=False),
             }
         },
     }
     client.events().insert(calendarId=cid_stats, body=payload).execute()
     logger.info(
-        "stats inserted month=%s title=%s body=%r",
+        "stats inserted month=%s title=%s body=%r gym_n=%s hall_n=%s",
         month_key,
         title,
         body_text.replace("\n", " / "),
+        len(gym_rows),
+        len(hall_rows),
     )
 
 

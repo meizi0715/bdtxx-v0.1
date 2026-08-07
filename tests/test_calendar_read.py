@@ -24,14 +24,24 @@ def _subj(raw: str) -> str:
     return str(make_header(decode_header(raw)))
 
 
-def _ev(name: str, shisetu: str, n: int | None = None) -> dict:
-    priv: dict = {"name": name, "shisetu": shisetu}
-    if n is not None:
-        priv["session_count"] = str(n)
+def _stats_ev(
+    month_key: str,
+    gym: list[dict] | None = None,
+    hall: list[dict] | None = None,
+) -> dict:
+    import json
+
     return {
-        "summary": name,
-        "start": {"dateTime": "2026-08-01T10:00:00+09:00"},
-        "extendedProperties": {"private": priv},
+        "summary": f"{int(month_key.split('-')[1])}月度予約統計",
+        "start": {"date": f"{month_key}-28"},
+        "extendedProperties": {
+            "private": {
+                "stats_kind": "monthly_reservation_stats",
+                "stats_month": month_key,
+                "gym": json.dumps(gym or [], ensure_ascii=False),
+                "hall": json.dumps(hall or [], ensure_ascii=False),
+            }
+        },
     }
 
 
@@ -74,54 +84,65 @@ class TestCalendarRead:
         rows = cr.get_matched({date(2026, 8, 1)}, svc=object())
         assert rows[date(2026, 8, 1)] == []
 
-    def test_get_counts_sort_and_merge(self, monkeypatch) -> None:  # noqa: ANN001
+    def test_get_counts_from_c4_stats(self, monkeypatch) -> None:  # noqa: ANN001
         monkeypatch.setenv("CFG_C1", "local/x.json")
-        monkeypatch.setenv("CFG_C2", "cal-a")
-        monkeypatch.setenv("CFG_C3", "cal-b")
+        monkeypatch.setenv("CFG_C4", "cal-stats")
 
         def fake_month(svc, cal_id, year, month):  # noqa: ANN001, ANN202
+            assert cal_id == "cal-stats"
             if (year, month) != (2026, 8):
                 return []
-            if cal_id == "cal-a":
-                return [
-                    _ev("Beta", "体育館", 2),
-                    _ev("Alpha", "体育館", 1),
-                    _ev("Gamma", "公民館", 3),
-                ]
             return [
-                _ev("Alpha", "体育館"),  # default 1 → Alpha total 2
-                _ev("Delta", "公民館", 1),
+                _stats_ev(
+                    "2026-08",
+                    gym=[{"name": "B", "count": 2}, {"name": "A", "count": 2}],
+                    hall=[{"name": "D", "count": 1}, {"name": "G", "count": 3}],
+                )
             ]
 
         monkeypatch.setattr(cr, "_list_month", fake_month)
         rows = cr.get_counts([(2026, 8)], svc=object())
-        assert rows[(2026, 8)]["体育館"] == [("Alpha", 2), ("Beta", 2)]
-        assert rows[(2026, 8)]["公民館"] == [("Delta", 1), ("Gamma", 3)]
+        assert rows[(2026, 8)]["体育館"] == [("A", 2), ("B", 2)]
+        assert rows[(2026, 8)]["公民館"] == [("D", 1), ("G", 3)]
 
-    def test_get_counts_skip_empty_group(self, monkeypatch) -> None:  # noqa: ANN001
+    def test_get_counts_missing_month_empty(self, monkeypatch) -> None:  # noqa: ANN001
         monkeypatch.setenv("CFG_C1", "local/x.json")
-        monkeypatch.setenv("CFG_C2", "cal-a")
-        monkeypatch.setenv("CFG_C3", "cal-b")
+        monkeypatch.setenv("CFG_C4", "cal-stats")
+        monkeypatch.setattr(cr, "_list_month", lambda *a, **k: [])
+        rows = cr.get_counts([(2026, 7)], svc=object())
+        assert rows[(2026, 7)]["体育館"] == []
+        assert rows[(2026, 7)]["公民館"] == []
+
+    def test_get_counts_skips_wrong_month_key(self, monkeypatch) -> None:  # noqa: ANN001
+        monkeypatch.setenv("CFG_C1", "local/x.json")
+        monkeypatch.setenv("CFG_C4", "cal-stats")
 
         def fake_month(svc, cal_id, year, month):  # noqa: ANN001, ANN202
-            if cal_id == "cal-a":
-                return [_ev("Only", "体育館", 5)]
-            return []
+            return [
+                _stats_ev(
+                    "2026-09",
+                    gym=[{"name": "X", "count": 9}],
+                    hall=[],
+                )
+            ]
 
         monkeypatch.setattr(cr, "_list_month", fake_month)
-        rows = cr.get_counts([(2026, 7)], svc=object())
-        assert rows[(2026, 7)]["体育館"] == [("Only", 5)]
-        assert rows[(2026, 7)]["公民館"] == []
+        rows = cr.get_counts([(2026, 8)], svc=object())
+        assert rows[(2026, 8)]["体育館"] == []
+        assert rows[(2026, 8)]["公民館"] == []
 
     def test_get_counts_three_months(self, monkeypatch) -> None:  # noqa: ANN001
         monkeypatch.setenv("CFG_C1", "local/x.json")
-        monkeypatch.setenv("CFG_C2", "cal-a")
-        monkeypatch.setenv("CFG_C3", "cal-b")
+        monkeypatch.setenv("CFG_C4", "cal-stats")
 
         def fake_month(svc, cal_id, year, month):  # noqa: ANN001, ANN202
-            if cal_id != "cal-a":
-                return []
-            return [_ev(f"M{month}", "公民館", month)]
+            return [
+                _stats_ev(
+                    f"{year:04d}-{month:02d}",
+                    gym=[],
+                    hall=[{"name": f"M{month}", "count": month}],
+                )
+            ]
 
         monkeypatch.setattr(cr, "_list_month", fake_month)
         months = [(2026, 7), (2026, 8), (2026, 9)]
