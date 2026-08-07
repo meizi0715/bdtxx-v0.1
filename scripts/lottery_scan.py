@@ -30,7 +30,7 @@ from core.notifier import (  # noqa: E402
     check_mail_cfg,
     send_text_msg,
 )
-from core.scanner import setup_lottery_logging  # noqa: E402
+from core.scanner import send_heartbeat, setup_lottery_logging  # noqa: E402
 
 logger = logging.getLogger("core.lottery")
 
@@ -134,6 +134,9 @@ def main() -> None:
         month,
         ",".join(venues.keys()),
     )
+    # Normal completion (mailed / unchanged / --no-mail). Not reached on
+    # uncaught exceptions / SystemExit (e.g. mail send failed).
+    send_heartbeat(env_key="CFG_D3")
 
 
 if __name__ == "__main__":
