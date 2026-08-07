@@ -31,36 +31,47 @@ from core.scanner import send_heartbeat, setup_logging, today_tokyo  # noqa: E40
 logger = logging.getLogger(__name__)
 
 
-def _maybe_send_summary(state: dict, total: int) -> None:
+def _maybe_send_summary(state: dict, total: int, groups: dict) -> None:
     if state.get("summary_sent"):
         return
     if not day_work_finished(state, total):
         return
-    done_n = len(list(state.get("done") or []))
-    subject, body = build_summary_mail(done_n, total)
+    done_list = [str(x) for x in (state.get("done") or [])]
+    done_n = len(done_list)
+    refs = sorted(groups.keys())
+    subject, body = build_summary_mail(
+        done_n,
+        total,
+        done_refs=done_list,
+        all_refs=refs,
+        failures=dict(state.get("failures") or {}),
+        groups=groups,
+    )
     check_mail_cfg()
     ok = bool(send_text_msg(subject, body))
     if ok:
         state["summary_sent"] = True
         save_sync_state(state)
         logger.info(
-            "summary mailed done=%s total=%s attempts=%s",
+            "summary mailed done=%s total=%s attempts=%s fail=%s",
             done_n,
             total,
             state.get("attempts"),
+            max(0, total - done_n),
         )
     else:
         logger.error("summary mail send failed; will retry next run")
 
 
 def _run(force_ref: str) -> None:
-    """Run one sync attempt / quiet exit. May raise SystemExit on bad config."""
+    """Run one sync attempt / quiet exit. May raise SystemExit on bad config.
+
+    ``force_ref`` (--group-ref) skips today's wrap-up quiet exits so a failed
+    group can be retried after done/attempts/summary_sent would otherwise stop
+    the random picker. State (attempts/done/failures/summary) is still updated.
+    """
     today = today_tokyo()
     state = load_sync_state(PATH_SYNC_STATE, today=today)
-
-    if state.get("summary_sent"):
-        logger.info("sync calendar already finished today; quiet exit")
-        return
 
     groups = load_groups()
     refs = sorted(groups.keys())
@@ -68,9 +79,15 @@ def _run(force_ref: str) -> None:
     if total <= 0:
         raise SystemExit("local/groups.json has no groups")
 
-    if day_work_finished(state, total):
-        _maybe_send_summary(state, total)
-        return
+    # Random mode only: respect daily wrap-up / quiet exit.
+    # Explicit --group-ref is intentional and must not be blocked by quota.
+    if not force_ref:
+        if state.get("summary_sent"):
+            logger.info("sync calendar already finished today; quiet exit")
+            return
+        if day_work_finished(state, total):
+            _maybe_send_summary(state, total, groups)
+            return
 
     done = set(str(x) for x in (state.get("done") or []))
 
@@ -81,7 +98,7 @@ def _run(force_ref: str) -> None:
     else:
         remaining = [r for r in refs if r not in done]
         if not remaining:
-            _maybe_send_summary(state, total)
+            _maybe_send_summary(state, total, groups)
             return
         group_ref = random.choice(remaining)
 
@@ -96,25 +113,31 @@ def _run(force_ref: str) -> None:
         bool(force_ref),
     )
 
-    try:
-        sync_one_group(group_ref, headless=True, today=today)
-    except Exception:
-        logger.exception("sync failed group=%s", group_ref)
-    else:
+    result = sync_one_group(group_ref, headless=True, today=today)
+    failures = dict(state.get("failures") or {})
+    if result.get("ok"):
         done_list = list(state.get("done") or [])
         if group_ref not in done_list:
             done_list.append(group_ref)
         state["done"] = done_list
+        failures.pop(group_ref, None)
+        state["failures"] = failures
         save_sync_state(state)
         logger.info("sync ok group=%s done=%s/%s", group_ref, len(done_list), total)
         try:
             update_stats_calendar(today=today, groups=groups)
         except Exception:
             logger.exception("stats calendar update failed after sync group=%s", group_ref)
+    else:
+        reason = str(result.get("error") or "").strip()
+        failures[group_ref] = reason
+        state["failures"] = failures
+        save_sync_state(state)
+        logger.error("sync failed group=%s reason=%s", group_ref, reason)
 
     # Re-check finish condition after this attempt
     state = load_sync_state(PATH_SYNC_STATE, today=today)
-    _maybe_send_summary(state, total)
+    _maybe_send_summary(state, total, groups)
 
 
 def main() -> None:
@@ -124,9 +147,10 @@ def main() -> None:
         default="",
         metavar="REF",
         help=(
-            "Force sync this group_ref (e.g. GROUP1), even if already in "
-            "today's done list. Still updates attempts/done and may send "
-            "the daily summary when finish conditions are met."
+            "Force sync this group_ref (e.g. GROUP1), skipping today's "
+            "wrap-up quiet exit (done/attempts/summary_sent). Still updates "
+            "attempts/done and may send the daily summary when finish "
+            "conditions are met."
         ),
     )
     args = parser.parse_args()

@@ -16,12 +16,14 @@ from playwright.async_api import Page, async_playwright
 
 from core.booking import (
     ROOT,
+    MSG_UNEXPECTED,
     _UA,
     _base_url,
     _goto_home,
     _tenant,
     login_as_group,
     resolve_group_ref,
+    user_error_message,
 )
 from core.calendar_read import SCOPES, _list_range
 from core.scanner import DATA_DIR, helper_1, today_tokyo
@@ -48,7 +50,21 @@ def _empty_state(day: date) -> dict[str, Any]:
         "done": [],
         "attempts": 0,
         "summary_sent": False,
+        "failures": {},
     }
+
+
+def _normalize_failures(raw: Any) -> dict[str, str]:
+    """Keep only {group_ref: japanese_reason} string pairs."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, val in raw.items():
+        ref = str(key or "").strip()
+        reason = str(val or "").strip()
+        if ref and reason:
+            out[ref] = reason
+    return out
 
 
 def load_sync_state(
@@ -85,6 +101,7 @@ def load_sync_state(
         "done": done,
         "attempts": max(0, attempts),
         "summary_sent": bool(raw.get("summary_sent")),
+        "failures": _normalize_failures(raw.get("failures")),
     }
 
 
@@ -99,6 +116,7 @@ def save_sync_state(
         "done": list(state.get("done") or []),
         "attempts": int(state.get("attempts") or 0),
         "summary_sent": bool(state.get("summary_sent")),
+        "failures": _normalize_failures(state.get("failures")),
     }
     with p.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
@@ -113,18 +131,71 @@ def sync_window(today: date | None = None) -> tuple[date, date]:
 def day_work_finished(state: dict[str, Any], total: int) -> bool:
     done_n = len(list(state.get("done") or []))
     attempts = int(state.get("attempts") or 0)
-    return done_n >= total or attempts >= total + 2
+    return done_n >= total or attempts >= total + 4
 
 
-def build_summary_mail(done_n: int, total: int, *, when: date | None = None) -> tuple[str, str]:
+def group_type_label(gtype: str) -> str:
+    """Map groups.json ``type`` to mail-facing 体育館/公民館."""
+    t = str(gtype or "").strip().lower()
+    if t == "gym":
+        return "体育館"
+    if t == "hall":
+        return "公民館"
+    return t or "?"
+
+
+def format_failure_mail_line(
+    group_ref: str,
+    *,
+    groups: dict[str, Any],
+    reason: str,
+) -> str:
+    """One bullet: ・GROUP4（体育館・Ｆ）：ログインに失敗しました…"""
+    entry = groups.get(group_ref) if isinstance(groups, dict) else None
+    if not isinstance(entry, dict):
+        entry = {}
+    type_label = group_type_label(str(entry.get("type") or ""))
+    initial = group_name_initial(str(entry.get("name") or ""))
+    msg = str(reason or "").strip() or MSG_UNEXPECTED
+    return f"・{group_ref}（{type_label}・{initial}）：{msg}"
+
+
+def build_summary_mail(
+    done_n: int,
+    total: int,
+    *,
+    when: date | None = None,
+    done_refs: list[str] | None = None,
+    all_refs: list[str] | None = None,
+    failures: dict[str, str] | None = None,
+    groups: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Build daily summary subject/body; list failed groups when fail_n > 0."""
     day = when or today_tokyo()
     subject = f"予約履歴カレンダー同期完了({day.month}/{day.day})"
     fail_n = max(0, total - done_n)
-    body = (
-        "本日の同期結果\n"
-        f"成功: {done_n}件 / 全{total}件\n"
-        f"失敗: {fail_n}件\n"
-    )
+    lines = [
+        "本日の同期結果",
+        f"成功: {done_n}件 / 全{total}件",
+        f"失敗: {fail_n}件",
+    ]
+    if fail_n > 0:
+        done_set = {str(x) for x in (done_refs or [])}
+        fail_map = _normalize_failures(failures)
+        group_map = groups if isinstance(groups, dict) else {}
+        if all_refs is not None:
+            failed_refs = [str(r) for r in all_refs if str(r) not in done_set]
+        else:
+            failed_refs = sorted(fail_map.keys())
+        for ref in failed_refs:
+            lines.append(
+                format_failure_mail_line(
+                    ref,
+                    groups=group_map,
+                    reason=fail_map.get(ref) or MSG_UNEXPECTED,
+                )
+            )
+    body = "\n".join(lines) + "\n"
     return subject, body
 
 
@@ -773,9 +844,22 @@ def sync_one_group(
     *,
     headless: bool = True,
     today: date | None = None,
-) -> None:
+) -> dict[str, Any]:
+    """Sync one group. Returns ``{"ok": True/False, "error": "<jp summary>"}``.
+
+    Operational failures are classified via ``user_error_message`` (no English
+    tech detail in ``error``). Unexpected exceptions are logged here.
+    """
     import asyncio
 
-    asyncio.run(
-        sync_one_group_async(group_ref, headless=headless, today=today)
-    )
+    try:
+        asyncio.run(
+            sync_one_group_async(group_ref, headless=headless, today=today)
+        )
+    except Exception as exc:
+        logger.exception("sync failed group=%s", group_ref)
+        return {
+            "ok": False,
+            "error": user_error_message(exc, log_detail=True),
+        }
+    return {"ok": True, "error": ""}
