@@ -655,9 +655,30 @@ def _reservation_id(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _event_matches_group(
+    priv: dict[str, Any],
+    *,
+    group_ref: str,
+    group_name: str,
+) -> bool:
+    """True when this synced event belongs to the target group.
+
+    Prefer ``group_ref`` (unique). Legacy events written before ``group_ref``
+    existed only have ``group_name``; match those by name so the next sync can
+    replace them. After all duplicate-name groups are re-synced once, only the
+    ``group_ref`` path remains relevant.
+    """
+    ref = str(priv.get("group_ref") or "").strip()
+    if ref:
+        return ref == group_ref
+    # Legacy: no group_ref on the event.
+    return str(priv.get("group_name") or "") == group_name
+
+
 def _delete_group_synced_events(
     client: Any,
     cal_id: str,
+    group_ref: str,
     group_name: str,
     tmin: str,
     tmax: str,
@@ -667,7 +688,9 @@ def _delete_group_synced_events(
         priv = (ev.get("extendedProperties") or {}).get("private") or {}
         if not isinstance(priv, dict):
             continue
-        if str(priv.get("group_name") or "") != group_name:
+        if not _event_matches_group(
+            priv, group_ref=group_ref, group_name=group_name
+        ):
             continue
         if "reservation_id" not in priv and "reservation_ids" not in priv:
             continue
@@ -682,6 +705,7 @@ def _delete_group_synced_events(
 def replace_group_events(
     rows: list[dict[str, Any]],
     *,
+    group_ref: str,
     group_name: str,
     start: date,
     end: date,
@@ -693,7 +717,8 @@ def replace_group_events(
 ) -> int:
     """Delete prior synced events for group in both calendars, then insert rows.
 
-    Rows must include ``receptionDate`` and ``inferred_type`` (from detail API).
+    Deletion matches on ``group_ref`` (unique). Rows must include
+    ``receptionDate`` and ``inferred_type`` (from detail API).
     Consecutive slots are merged before insert. Returns events inserted.
     """
     path, cid_reg, cid_lot = _calendars_cfg(cred_path, cal_regular, cal_lottery)
@@ -701,11 +726,14 @@ def replace_group_events(
     tmin, tmax = _range_bounds(start, end)
     deleted = 0
     for cid in (cid_reg, cid_lot):
-        n = _delete_group_synced_events(client, cid, group_name, tmin, tmax)
+        n = _delete_group_synced_events(
+            client, cid, group_ref, group_name, tmin, tmax
+        )
         deleted += n
     if deleted:
         logger.info(
-            "calendar sync deleted old events group=%s n=%s (both calendars)",
+            "calendar sync deleted old events group_ref=%s name=%s n=%s (both calendars)",
+            group_ref,
             group_name,
             deleted,
         )
@@ -746,6 +774,7 @@ def replace_group_events(
                 "private": {
                     "reservation_id": ids[0],
                     "reservation_ids": ids_csv,
+                    "group_ref": group_ref,
                     "group_name": group_name,
                     "facilityId": fid,
                     "status": str(ev.get("status", "")),
@@ -825,6 +854,7 @@ async def sync_one_group_async(
             )
             n = replace_group_events(
                 enriched,
+                group_ref=group_ref,
                 group_name=group_name,
                 start=start,
                 end=end,
