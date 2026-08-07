@@ -1,36 +1,25 @@
-# util system (migration in progress)
+# 川口市バドミントン予約システム
 
-Skeleton + HTTP daily task. Fill `config/cfg_items.json` ids and `.env` before use.
+日常运维请看 **[使用说明.md](./使用说明.md)**（功能概要、输入输出、日志是否增长、如何运行）。
 
-## setup
+## 快速开始
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-cp local/names.example.json local/names.json
+# 按使用说明复制 local/*.example.json → 对应本体，并配置日历凭证
 ```
 
-## env
-
-| key | meaning |
-|-----|---------|
-| CFG_A1 | smtp user |
-| CFG_A2 | smtp secret |
-| CFG_A3 | smtp to |
-| CFG_B1 | http base |
-| CFG_B2 | tenant path segment |
-
-## run
+## 常用入口
 
 ```bash
 python scripts/scan_daily.py
-python -m pytest tests/ -v
+python scripts/lottery_scan.py
+python scripts/auto_book.py
+python scripts/sync_calendar.py
+pytest -q
 ```
 
-## notes
-
-- `config/cfg_items.json`: codes `v01`..`v12` + numeric ids (placeholders `0` until filled)
-- `local/names.json`: local-only label map (gitignored)
-- state under `data/` (gitignored)
+`data/` 与多数 `local/` 私密文件已 gitignore，勿提交密钥与密码。
